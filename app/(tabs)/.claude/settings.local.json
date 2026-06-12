@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(cd /c/Dev/mtg-phase-reminder && npx tsc --noEmit 2>&1 | head -60)",
+      "Read(//c/Dev/mtg-phase-reminder/**)",
+      "PowerShell(python --version 2>&1)",
+      "PowerShell(python3 --version 2>&1)",
+      "PowerShell(python \"c:\\\\Dev\\\\mtg-phase-reminder\\\\fix_encoding.py\" 2>&1)",
+      "PowerShell(npx --prefix \"c:\\\\Dev\\\\mtg-phase-reminder\" tsc --noEmit --project \"c:\\\\Dev\\\\mtg-phase-reminder\\\\tsconfig.json\" 2>&1)",
+      "Bash(mkdir -p \"c:/Dev/mtg-phase-reminder/.vscode\")",
+      "Bash(echo '{\"files.encoding\": \"utf8\"}')",
+      "Bash(Select-String -Path \"C:\\\\Users\\\\Jailbreak\\\\.claude\\\\projects\\\\c--Dev-mtg-phase-reminder-app--tabs-\\\\1a6c78f5-b019-4cc1-a385-2ad26d062b50.jsonl\" -Pattern \"Prompt 2 of 4\")",
+      "Bash(Select-Object -First 1 -ExpandProperty Line)",
+      "Bash(python3)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}
