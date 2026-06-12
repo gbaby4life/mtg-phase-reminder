@@ -1030,13 +1030,9 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [activeReminderModal, setActiveReminderModal] = useState(false);
   const [activeReminderItem, setActiveReminderItem] = useState<Reminder | null>(null);
   const [eventReminderToggle, setEventReminderToggle] = useState(false);
-  const [quickReminderModal, setQuickReminderModal] = useState(false);
-  const [quickReminderName, setQuickReminderName] = useState("");
-  const [quickReminderTrigger, setQuickReminderTrigger] = useState<string | null>(null);
-  const [quickReminderTriggerSearch, setQuickReminderTriggerSearch] = useState("");
-  const [quickReminderEffect, setQuickReminderEffect] = useState<string | null>(null);
-  const [quickReminderEffectSearch, setQuickReminderEffectSearch] = useState("");
-  const [quickReminderFrequency, setQuickReminderFrequency] = useState<"each-time" | "once-per-turn" | "once-per-game">("each-time");
+  const [phaseReminderPopup, setPhaseReminderPopup] = useState(false);
+  const [reminderPopupMode, setReminderPopupMode] = useState<"once-per-phase-per-turn" | "always">("once-per-phase-per-turn");
+  const [shownPhaseReminderKeys, setShownPhaseReminderKeys] = useState<string[]>([]);
   // Unified reminder builder state
   const [ubName, setUbName] = useState("");
   const [ubDescription, setUbDescription] = useState("");
@@ -1061,6 +1057,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [hubEventsModal, setHubEventsModal] = useState(false);
   const [hubEventOwner, setHubEventOwner] = useState<string>("");
   const hubOwnerRef = useRef<string | null>(null);
+  const prevActivePhaseViewRef = useRef<string | null>(null);
 
   const phase = PHASES[state.phaseIndex];
   const { extraLandPlays } = getPassiveEffects(state.reminders);
@@ -1130,6 +1127,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
     } else {
       setConfirmedMyPhases([]);
     }
+    setShownPhaseReminderKeys([]);
     setHubEventOwner("");
   }, [state.turnNumber, state.isMyTurn]);
 
@@ -1144,6 +1142,46 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
     }
   }, [spellModal, spellDetailModal, drawModal, creatureModal, landModal,
       tokenModal, addManaModal, othersModal, gainLoseLifeModal, genericEvent]);
+
+  useEffect(() => {
+    const prevPhaseView = prevActivePhaseViewRef.current;
+    prevActivePhaseViewRef.current = state.activePhaseView;
+    if (state.activePhaseView === null || prevPhaseView === state.activePhaseView) return;
+    const enteredPhase = state.activePhaseView;
+    const pendingForPhase = state.reminders.filter(r => {
+      if (r.fireMode !== "phase") return false;
+      if (r.status !== "active" && r.status !== "pending") return false;
+      const turnMatches =
+        r.activeDuring === "both" ||
+        (r.activeDuring === "mine" && !isOppTurn) ||
+        (r.activeDuring === "opponent" && isOppTurn);
+      if (!turnMatches) return false;
+      return r.phases.length === 0 || r.phases.includes(enteredPhase);
+    });
+    if (pendingForPhase.length === 0) return;
+    const key = `${state.turnNumber}-${enteredPhase}`;
+    if (reminderPopupMode === "once-per-phase-per-turn" && shownPhaseReminderKeys.includes(key)) return;
+    setPhaseReminderPopup(true);
+    if (reminderPopupMode === "once-per-phase-per-turn") {
+      setShownPhaseReminderKeys(keys => [...keys, key]);
+    }
+  }, [state.activePhaseView, state.reminders, state.turnNumber, isOppTurn, reminderPopupMode, shownPhaseReminderKeys]);
+
+  useEffect(() => {
+    if (!phaseReminderPopup || state.activePhaseView === null) return;
+    const enteredPhase = state.activePhaseView;
+    const remaining = state.reminders.filter(r => {
+      if (r.fireMode !== "phase") return false;
+      if (r.status !== "active" && r.status !== "pending") return false;
+      const turnMatches =
+        r.activeDuring === "both" ||
+        (r.activeDuring === "mine" && !isOppTurn) ||
+        (r.activeDuring === "opponent" && isOppTurn);
+      if (!turnMatches) return false;
+      return r.phases.length === 0 || r.phases.includes(enteredPhase);
+    });
+    if (remaining.length === 0) setPhaseReminderPopup(false);
+  }, [state.reminders, phaseReminderPopup]);
 
   const rainbowColor = RAINBOW_COLORS[rainbowIndex];
   const pulseScale = pulseAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.8] });
@@ -3956,221 +3994,55 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
         </View>
       </Modal>
 
-      {/* QUICK REMINDER BUILDER MODAL — opened from game event toggles */}
-      <Modal visible={quickReminderModal} transparent animationType="slide" onRequestClose={() => { setQuickReminderModal(false); setEventReminderToggle(false); }}>
-        <KeyboardAvoidingView style={{ flex: 1, justifyContent: "flex-end" }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-          <TouchableOpacity style={s.backdrop} onPress={() => { setQuickReminderModal(false); setEventReminderToggle(false); }} />
-          <View style={[s.sheet, { maxHeight: "88%", flex: 1 }]}>
-            <View style={s.handle} />
-            <Text style={s.sheetTitle}>🔔 Add Reminder</Text>
-            <Text style={{ color: C.dim, fontSize: 12, marginTop: -12, marginBottom: 16 }}>Quick reminder for this event</Text>
-
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 8 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-
-              {/* NAME */}
-              <Text style={s.sectionLabel}>Reminder Name *</Text>
-              <TextInput
-                style={[s.input, { marginBottom: 16 }]}
-                value={quickReminderName}
-                onChangeText={setQuickReminderName}
-                placeholder="e.g. Soul Warden — gain 1 life"
-                placeholderTextColor={C.dim}
-              />
-
-              {/* TRIGGER */}
-              <Text style={s.sectionLabel}>When does it fire?</Text>
-              {quickReminderTrigger ? (
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                  <View style={{ flex: 1, backgroundColor: C.accentDim, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: C.accent }}>
-                    <Text style={{ color: C.accent, fontSize: 13, fontWeight: "600" }}>⚡ {quickReminderTrigger}</Text>
-                  </View>
-                  <TouchableOpacity onPress={() => setQuickReminderTrigger(null)} style={{ padding: 4 }}>
-                    <Text style={{ color: C.danger, fontSize: 20, fontWeight: "700" }}>✕</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : (
-                <>
-                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-                    {["Creature enters the battlefield", "Creature dies", "Spell is cast", "Card is drawn", "Upkeep begins", "End Step begins", "You attack with one or more creatures", "You are attacked", "Token is created", "Land is played"].map(t => (
-                      <TouchableOpacity
-                        key={t}
-                        style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14, backgroundColor: C.cardAlt, borderWidth: 1, borderColor: C.border }}
-                        onPress={() => setQuickReminderTrigger(t)}
-                      >
-                        <Text style={{ color: C.muted, fontSize: 11 }}>{t}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                  <TextInput
-                    style={[s.input, { marginBottom: 4 }]}
-                    value={quickReminderTriggerSearch}
-                    onChangeText={setQuickReminderTriggerSearch}
-                    placeholder="Search events..."
-                    placeholderTextColor={C.dim}
-                  />
-                  {quickReminderTriggerSearch.length > 0 && (
-                    <View style={{ maxHeight: 180, backgroundColor: C.cardAlt, borderRadius: 10, borderWidth: 1, borderColor: C.border, marginBottom: 12, overflow: "hidden" }}>
-                      <ScrollView nestedScrollEnabled showsVerticalScrollIndicator={false}>
-                        {(GAME_EVENTS as readonly string[])
-                          .filter(t => t.toLowerCase().includes(quickReminderTriggerSearch.toLowerCase()))
-                          .slice(0, 20)
-                          .map(t => (
-                            <TouchableOpacity
-                              key={t}
-                              style={[s.gyRow, { paddingHorizontal: 12 }]}
-                              onPress={() => { setQuickReminderTrigger(t); setQuickReminderTriggerSearch(""); }}
-                            >
-                              <Text style={{ flex: 1, color: C.text, fontSize: 13 }}>⚡ {t}</Text>
-                            </TouchableOpacity>
-                          ))}
-                      </ScrollView>
-                    </View>
-                  )}
-                </>
-              )}
-
-              {/* EFFECT */}
-              <Text style={s.sectionLabel}>Effect when resolved (optional)</Text>
-              {quickReminderEffect ? (
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                  <View style={{ flex: 1, backgroundColor: C.successDim, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: C.success }}>
-                    <Text style={{ color: C.success, fontSize: 13, fontWeight: "600" }}>→ {quickReminderEffect}</Text>
-                  </View>
-                  <TouchableOpacity onPress={() => setQuickReminderEffect(null)} style={{ padding: 4 }}>
-                    <Text style={{ color: C.danger, fontSize: 20, fontWeight: "700" }}>✕</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : (
-                <>
-                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-                    {["Gain 1 life", "Gain 2 life", "Gain 3 life", "Lose 1 life", "Draw 1 card", "Add 1 White mana", "Add 1 Blue mana", "Add 1 Black mana", "Add 1 Red mana", "Add 1 Green mana", "Log only — no state change"].map(ef => (
-                      <TouchableOpacity
-                        key={ef}
-                        style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14, backgroundColor: C.cardAlt, borderWidth: 1, borderColor: C.border }}
-                        onPress={() => setQuickReminderEffect(ef)}
-                      >
-                        <Text style={{ color: C.muted, fontSize: 11 }}>{ef}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                  <TextInput
-                    style={[s.input, { marginBottom: 4 }]}
-                    value={quickReminderEffectSearch}
-                    onChangeText={setQuickReminderEffectSearch}
-                    placeholder="Search more effects..."
-                    placeholderTextColor={C.dim}
-                  />
-                  {quickReminderEffectSearch.length > 0 && (
-                    <View style={{ maxHeight: 160, backgroundColor: C.cardAlt, borderRadius: 10, borderWidth: 1, borderColor: C.border, marginBottom: 12, overflow: "hidden" }}>
-                      <ScrollView nestedScrollEnabled showsVerticalScrollIndicator={false}>
-                        {EFFECT_TYPE_OPTIONS.map(o => o.label)
-                          .filter(e => e.toLowerCase().includes(quickReminderEffectSearch.toLowerCase()))
-                          .slice(0, 20)
-                          .map(e => (
-                            <TouchableOpacity
-                              key={e}
-                              style={[s.gyRow, { paddingHorizontal: 12 }]}
-                              onPress={() => { setQuickReminderEffect(e); setQuickReminderEffectSearch(""); }}
-                            >
-                              <Text style={{ flex: 1, color: C.text, fontSize: 13 }}>{e}</Text>
-                            </TouchableOpacity>
-                          ))}
-                      </ScrollView>
-                    </View>
-                  )}
-                </>
-              )}
-
-              {/* FREQUENCY */}
-              <Text style={s.sectionLabel}>How often?</Text>
-              <View style={{ flexDirection: "row", gap: 8, marginBottom: 8 }}>
-                {(["each-time", "once-per-turn", "once-per-game"] as const).map(f => (
-                  <TouchableOpacity
-                    key={f}
-                    style={[{ flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: "center", borderWidth: 1.5 },
-                      quickReminderFrequency === f
-                        ? { backgroundColor: C.accentDim, borderColor: C.accent }
-                        : { backgroundColor: C.cardAlt, borderColor: C.border }]}
-                    onPress={() => setQuickReminderFrequency(f)}
-                  >
-                    <Text style={{ color: quickReminderFrequency === f ? C.accent : C.muted, fontSize: 10, fontWeight: "700", textAlign: "center" }}>
-                      {f === "each-time" ? "Every Time" : f === "once-per-turn" ? "Once / Turn" : "Once / Game"}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-            </ScrollView>
-
-            <View style={s.modalBtnRow}>
-              <TouchableOpacity
-                style={s.modalCancelBtn}
-                onPress={() => {
-                  setQuickReminderModal(false);
-                  setQuickReminderName("");
-                  setQuickReminderTrigger(null);
-                  setQuickReminderTriggerSearch("");
-                  setQuickReminderEffect(null);
-                  setQuickReminderEffectSearch("");
-                  setQuickReminderFrequency("each-time");
-                  setEventReminderToggle(false);
-                }}
-              >
-                <Text style={s.closeBtnText}>Skip</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[s.modalConfirmBtn, !quickReminderName.trim() && { opacity: 0.4 }]}
-                disabled={!quickReminderName.trim()}
-                onPress={() => {
-                  if (!quickReminderName.trim()) return;
-                  const qEffectType: ReminderEffectType = quickReminderEffect
-                    ? (quickReminderEffect.toLowerCase().includes("gain") ? "gain-life"
-                      : quickReminderEffect.toLowerCase().includes("lose") ? "lose-life"
-                      : quickReminderEffect.toLowerCase().includes("draw") ? "draw-cards"
-                      : quickReminderEffect.toLowerCase().includes("mana") ? "add-mana"
-                      : "log-only")
-                    : "log-only";
-                  const qAmount = quickReminderEffect ? (parseInt(quickReminderEffect.match(/\d+/)?.[0] ?? "1", 10) || 1) : 1;
-                  const qFx: ReminderEffect = {
-                    id: `fx-${Date.now()}`,
-                    timing: "immediate",
-                    effectType: qEffectType,
-                    amount: qEffectType !== "log-only" ? qAmount : undefined,
-                    customText: quickReminderEffect && qEffectType === "log-only" ? quickReminderEffect : undefined,
-                  };
-                  const newReminder: Reminder = {
-                    id: `rem-${Date.now()}-${Math.random()}`,
-                    name: quickReminderName.trim(),
-                    fireMode: "event",
-                    phases: [],
-                    triggerEvent: quickReminderTrigger ?? "Custom trigger",
-                    conditions: [],
-                    activePhases: [],
-                    activeDuring: "both",
-                    frequency: quickReminderFrequency,
-                    effects: [qFx],
-                    status: "active",
-                    sourceLabel: "Game Event",
-                    firedCount: 0,
-                    firedThisTurn: false,
-                  };
-                  dispatch({ type: "ADD_REMINDER", reminder: newReminder });
-                  dispatch({ type: "LOG", message: `🔔 Reminder added: ${quickReminderName.trim()}` });
-                  setQuickReminderModal(false);
-                  setQuickReminderName("");
-                  setQuickReminderTrigger(null);
-                  setQuickReminderTriggerSearch("");
-                  setQuickReminderEffect(null);
-                  setQuickReminderEffectSearch("");
-                  setQuickReminderFrequency("each-time");
-                  setEventReminderToggle(false);
-                }}
-              >
-                <Text style={s.startBtnText}>Save Reminder</Text>
+      {/* PHASE REMINDER POPUP */}
+      <Modal visible={phaseReminderPopup} transparent animationType="fade" onRequestClose={() => setPhaseReminderPopup(false)}>
+        <View style={s.centeredOverlay}>
+          <View style={[s.centeredModal, { maxHeight: "80%" }]}>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <Text style={[s.sheetTitle, { flex: 1 }]}>📍 Phase Reminders</Text>
+              <TouchableOpacity onPress={() => setPhaseReminderPopup(false)} style={{ padding: 6 }}>
+                <Text style={{ color: C.muted, fontSize: 22, fontWeight: "700", lineHeight: 24 }}>✕</Text>
               </TouchableOpacity>
             </View>
+            {state.activePhaseView !== null && (
+              <Text style={[s.reminderDesc, { textAlign: "center", marginBottom: 12 }]}>{state.activePhaseView}</Text>
+            )}
+            <ScrollView showsVerticalScrollIndicator={false} style={{ width: "100%" }} contentContainerStyle={{ gap: 8 }}>
+              {(state.activePhaseView !== null
+                ? state.reminders.filter(r => {
+                    if (r.fireMode !== "phase") return false;
+                    if (r.status !== "active" && r.status !== "pending") return false;
+                    const turnMatches =
+                      r.activeDuring === "both" ||
+                      (r.activeDuring === "mine" && !isOppTurn) ||
+                      (r.activeDuring === "opponent" && isOppTurn);
+                    if (!turnMatches) return false;
+                    return r.phases.length === 0 || r.phases.includes(state.activePhaseView!);
+                  })
+                : []
+              ).map(r => (
+                <View key={r.id} style={{ backgroundColor: C.cardAlt, borderRadius: 10, borderWidth: 1, borderColor: C.border, padding: 12 }}>
+                  <Text style={s.reminderTitle}>{r.name}</Text>
+                  {r.description ? <Text style={[s.reminderDesc, { marginBottom: 8 }]}>{r.description}</Text> : null}
+                  <View style={{ flexDirection: "row", gap: 8, marginTop: 6 }}>
+                    <TouchableOpacity
+                      style={[s.resolveBtn, { flex: 1, alignItems: "center" }]}
+                      onPress={() => dispatch({ type: "RESOLVE_REMINDER", id: r.id })}
+                    >
+                      <Text style={s.resolveBtnText}>Resolve</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[s.skipBtn, { flex: 1, alignItems: "center" }]}
+                      onPress={() => dispatch({ type: "SKIP_REMINDER", id: r.id })}
+                    >
+                      <Text style={s.skipBtnText}>Skip</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+            </ScrollView>
           </View>
-        </KeyboardAvoidingView>
+        </View>
       </Modal>
 
     </> ); }
@@ -4261,7 +4133,7 @@ const s = StyleSheet.create({
   spellTypeBtnActive: { backgroundColor: C.accentDim, borderColor: C.accent },
   spellTypeIcon: { fontSize: 20 },
   spellTypeLabel: { fontSize: 11, fontWeight: "600", color: C.muted, textAlign: "center" },
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: C.overlay },
+  backdrop: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: C.overlay },
   sheet: { backgroundColor: C.card, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 24, paddingBottom: 40, borderTopWidth: 1, borderColor: C.border },
   handle: { width: 36, height: 4, backgroundColor: C.border, borderRadius: 2, alignSelf: "center", marginBottom: 16 },
   sheetTitle: { fontSize: 18, fontWeight: "800", color: C.text, marginBottom: 16 },
