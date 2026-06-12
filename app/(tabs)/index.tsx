@@ -14,7 +14,7 @@ import {
   recordEventReminderFires, applyImmediateEffects,
   getPassiveEffects, resetPhaseReminders, activatePhaseReminders,
   resetEventReminderTurnFlags, deactivateRemindersForSpell,
-} from "./reminderSystem";
+} from "../../System/reminderSystem";
 import { searchCardNames, CardNameRecord } from "../../System/cardSearchSystem";
 
 // ─── COLORS ───────────────────────────────────────────────────────────────────
