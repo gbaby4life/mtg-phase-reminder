@@ -16,8 +16,8 @@ import {
   resetEventReminderTurnFlags, deactivateRemindersForSpell,
 } from "../../System/reminderSystem";
 import { searchCardNames, CardNameRecord } from "../../System/cardSearchSystem";
-import { C } from "../../lib/types";
-import type { HistoryEntry, CastSpell, GraveyardEntry, ExileEntry, TokenGYEntry, ManaPool, Player, GameState, Action, CreatureCounterType } from "../../lib/types";
+import { C, emptyManaCost, formatManaCostLabel, getManaCostValue, hasManaCost } from "../../lib/types";
+import type { HistoryEntry, CastSpell, GraveyardEntry, ExileEntry, TokenGYEntry, ManaPool, Player, GameState, Action, CreatureCounterType, ManaCost, CommanderRecord } from "../../lib/types";
 import BattlefieldModal from "../../components/BattlefieldModal";
 
 const PHASES = [
@@ -35,6 +35,15 @@ const COMMON_TOKENS = [
 ];
 
 const CREATURE_COUNTER_TYPES: CreatureCounterType[] = ["+1/+0", "+0/+1", "+1/+1", "-1/-0", "-0/-1", "-1/-1"];
+
+const MANA_COST_TYPES: { key: keyof ManaCost; label: string }[] = [
+  { key: "generic", label: "Generic" },
+  { key: "white", label: "White" },
+  { key: "blue", label: "Blue" },
+  { key: "black", label: "Black" },
+  { key: "red", label: "Red" },
+  { key: "green", label: "Green" },
+];
 
 const SPELL_TYPES = [
   { key: "Creature", icon: "🐉" },
@@ -194,6 +203,8 @@ const INIT: GameState = {
   firstPlayerIndex: 0,
   opponentPhaseIndex: 0,
   eventOwnerPlayerId: null,
+  commanders: [],
+  commanderDamage: {},
 };
 
 function logEntry(state: GameState, message: string, playerId?: string): HistoryEntry {
@@ -240,6 +251,7 @@ function reducer(state: GameState, action: Action): GameState {
         phaseLocked: false, cardsDrawn: 0, landsPlayed: 0,
         reminders: activatePhaseReminders(makeDefaultReminders(), PHASES[0], !startsAsOpponent), pendingReminderFires: [],
         history: [], spellLog: [],
+        commanders: action.commanders ?? [], commanderDamage: action.commanderDamage ?? {},
         players: action.players, turnOrder: action.turnOrder,
         firstPlayerIndex: action.firstPlayerIndex,
         currentPlayerIndex: 0, opponentPhaseIndex: 0,
@@ -447,15 +459,184 @@ function reducer(state: GameState, action: Action): GameState {
     case "LOG_EVENT": { const entry = logEntry(state, `[${action.eventType}] ${action.detail}`, action.playerId); return { ...state, history: [...state.history, entry], eventOwnerPlayerId: null }; }
     case "SET_EVENT_OWNER": return { ...state, eventOwnerPlayerId: action.playerId };
     case "RESET_EVENT_OWNER": return { ...state, eventOwnerPlayerId: null };
+    case "MARK_AS_COMMANDER": {
+      const sp = state.spellLog.find(x => x.id === action.spellId);
+      if (!sp) return state;
+      if (sp.zone !== "active") return state;
+      const isCreatureLike = sp.type === "Creature" || (sp.isToken && sp.tokenCategory === "creature");
+      if (!isCreatureLike || !sp.playerId) return state;
+      const ownerPlayerId = sp.playerId;
+      const initialCommanderId = sp.commanderId ?? `commander-${sp.id}`;
+      const existingRecord = state.commanders.find(c => c.id === initialCommanderId || c.spellId === sp.id);
+      const commanderId = existingRecord?.id ?? initialCommanderId;
+      const commanderRecord = {
+        id: commanderId,
+        ownerPlayerId,
+        name: sp.name,
+        manaValue: sp.manaValue,
+        manaCost: sp.manaCost,
+        type: sp.type,
+        power: sp.power,
+        toughness: sp.toughness,
+        abilities: sp.abilities,
+        supertype: sp.supertype,
+        subtype: sp.subtype,
+        subtype2: sp.subtype2,
+        currentZone: "battlefield" as const,
+        spellId: sp.id,
+        timesCastFromCommandZone: existingRecord?.timesCastFromCommandZone ?? 0,
+      };
+      const commanders = existingRecord
+        ? state.commanders.map(c => c.id === existingRecord.id ? commanderRecord : c)
+        : [...state.commanders, commanderRecord];
+      const spellLog = state.spellLog.map(x => x.id === sp.id ? { ...x, isCommander: true, commanderId: commanderRecord.id, commanderOwnerPlayerId: ownerPlayerId } : x);
+      const entry = logEntry(state, `${sp.name} marked as commander.`, ownerPlayerId);
+      return { ...state, spellLog, commanders, history: [...state.history, entry] };
+    }
+    case "UNMARK_AS_COMMANDER": {
+      const sp = state.spellLog.find(x => x.id === action.spellId);
+      const commanderId = sp?.commanderId ?? state.commanders.find(c => c.spellId === action.spellId)?.id;
+      if (!sp || !commanderId) return state;
+      const spellLog = state.spellLog.map(x => x.id === action.spellId ? { ...x, isCommander: false, commanderId: undefined, commanderOwnerPlayerId: undefined } : x);
+      const hasCommanderDamage = Object.values(state.commanderDamage).some(damageByCommander => (damageByCommander[commanderId] ?? 0) > 0);
+      const commanders = hasCommanderDamage
+        ? state.commanders.map(c => c.id === commanderId ? { ...c, currentZone: c.currentZone === "battlefield" ? "commandZone" as const : c.currentZone, spellId: undefined } : c)
+        : state.commanders.filter(c => c.id !== commanderId);
+      const entry = logEntry(state, `${sp.name} unmarked as commander.`, sp.playerId);
+      return { ...state, spellLog, commanders, history: [...state.history, entry] };
+    }
+    case "APPLY_COMMANDER_DAMAGE": {
+      if (action.amount <= 0) return state;
+      const amount = action.amount;
+      const commander = state.commanders.find(c => c.id === action.commanderId);
+      const defender = state.players.find(p => p.id === action.defendingPlayerId);
+      if (!commander || !defender) return state;
+      if (commander.ownerPlayerId === action.defendingPlayerId) return state;
+      const oldDamage = state.commanderDamage[action.defendingPlayerId]?.[action.commanderId] ?? 0;
+      const newDamage = oldDamage + amount;
+      const players = updatePlayerLife(state.players, action.defendingPlayerId, life => life - amount);
+      const commanderDamage = {
+        ...state.commanderDamage,
+        [action.defendingPlayerId]: {
+          ...(state.commanderDamage[action.defendingPlayerId] ?? {}),
+          [action.commanderId]: newDamage,
+        },
+      };
+      const entries = [
+        logEntry(state, `${defender.name} took ${amount} commander damage from ${commander.name} (${newDamage}/21).`, action.defendingPlayerId),
+      ];
+      if (oldDamage < 21 && newDamage >= 21) {
+        entries.push(logEntry(state, `⚠ ${defender.name} has lethal commander damage from ${commander.name}.`, action.defendingPlayerId));
+      }
+      return { ...state, players, life: players.find(p => p.isUser)?.life ?? state.life, commanderDamage, history: [...state.history, ...entries] };
+    }
+    case "SET_COMMANDER_DAMAGE": {
+      const amount = Math.max(0, action.amount);
+      const commander = state.commanders.find(c => c.id === action.commanderId);
+      const defender = state.players.find(p => p.id === action.defendingPlayerId);
+      if (!commander || !defender) return state;
+      const commanderDamage = {
+        ...state.commanderDamage,
+        [action.defendingPlayerId]: {
+          ...(state.commanderDamage[action.defendingPlayerId] ?? {}),
+          [action.commanderId]: amount,
+        },
+      };
+      const entries = [
+        logEntry(state, `${defender.name} commander damage from ${commander.name} corrected to ${amount}/21.`, action.defendingPlayerId),
+      ];
+      if (amount >= 21) {
+        entries.push(logEntry(state, `⚠ ${defender.name} has lethal commander damage from ${commander.name}.`, action.defendingPlayerId));
+      }
+      return { ...state, commanderDamage, history: [...state.history, ...entries] };
+    }
+    case "MOVE_COMMANDER_TO_COMMAND_ZONE": {
+      const sp = state.spellLog.find(x => x.id === action.spellId);
+      if (!sp || !sp.isCommander || !sp.commanderId) return state;
+      const commander = state.commanders.find(c => c.id === sp.commanderId);
+      if (!commander) return state;
+      const commanders = state.commanders.map(c => c.id === commander.id ? {
+        ...c,
+        name: sp.name,
+        manaValue: sp.manaValue,
+        manaCost: sp.manaCost,
+        type: sp.type,
+        power: sp.power,
+        toughness: sp.toughness,
+        abilities: sp.abilities,
+        supertype: sp.supertype,
+        subtype: sp.subtype,
+        subtype2: sp.subtype2,
+        currentZone: "commandZone" as const,
+        spellId: undefined,
+      } : c);
+      const spellLog = state.spellLog.map(x => x.id === action.spellId ? { ...x, zone: "commandZone" as const, attacking: false, blockedByIds: [], blockingId: null } : x);
+      const finalReminders = deactivateRemindersForSpell(state.reminders, action.spellId);
+      const entry = logEntry(state, `${sp.name} moved to command zone.`, commander.ownerPlayerId);
+      return { ...state, spellLog, commanders, reminders: finalReminders, history: [...state.history, entry] };
+    }
+    case "CAST_COMMANDER_FROM_COMMAND_ZONE": {
+      const commander = state.commanders.find(c => c.id === action.commanderId);
+      if (!commander) return state;
+      const activeCommanderSpell = state.spellLog.find(x => x.zone === "active" && x.isCommander && x.commanderId === commander.id);
+      if (activeCommanderSpell) return state;
+      const currentTax = Math.max(0, commander.timesCastFromCommandZone) * 2;
+      const spellId = `spell-${Date.now()}-${Math.random()}`;
+      const commanderSpell: CastSpell = {
+        id: spellId,
+        name: commander.name,
+        type: commander.type ?? "Creature",
+        supertype: commander.supertype,
+        subtype: commander.subtype,
+        subtype2: commander.subtype2,
+        power: commander.power,
+        toughness: commander.toughness,
+        manaValue: commander.manaValue,
+        manaCost: commander.manaCost,
+        abilities: commander.abilities,
+        turnNumber: state.turnNumber,
+        phase: PHASES[state.phaseIndex],
+        zone: "active",
+        isToken: false,
+        playerId: commander.ownerPlayerId,
+        isCommander: true,
+        commanderId: commander.id,
+        commanderOwnerPlayerId: commander.ownerPlayerId,
+      };
+      const spellLog = [...state.spellLog, commanderSpell];
+      const commanders = state.commanders.map(c => c.id === commander.id
+        ? { ...c, currentZone: "battlefield" as const, spellId, timesCastFromCommandZone: c.timesCastFromCommandZone + 1 }
+        : c);
+      const commanderManaValue = getManaCostValue(commander.manaCost, commander.manaValue);
+      const mvText = commanderManaValue === undefined ? " Mana value unknown." : ` Mana value ${commanderManaValue}.`;
+      const entry = logEntry(state, `${commander.name} cast from command zone. Commander tax for this cast was +${currentTax}.${mvText}`, commander.ownerPlayerId);
+      return { ...state, spellLog, commanders, history: [...state.history, entry] };
+    }
     case "DELETE_SPELL": return { ...state, spellLog: state.spellLog.filter(x => x.id !== action.id) };
     case "EDIT_SPELL": {
       const sp = state.spellLog.find(x => x.id === action.id);
       if (!sp) return state;
       const updated = { ...sp, ...action.updates } as CastSpell;
       const entry = logEntry(state, `✎ Edited: ${updated.name} (${updated.type})`);
+      const commanders = updated.isCommander && updated.commanderId
+        ? state.commanders.map(c => c.id === updated.commanderId ? {
+            ...c,
+            name: updated.name,
+            manaValue: updated.manaValue,
+            manaCost: updated.manaCost,
+            type: updated.type,
+            power: updated.power,
+            toughness: updated.toughness,
+            abilities: updated.abilities,
+            supertype: updated.supertype,
+            subtype: updated.subtype,
+            subtype2: updated.subtype2,
+          } : c)
+        : state.commanders;
       return {
         ...state,
         spellLog: state.spellLog.map(x => x.id === action.id ? updated : x),
+        commanders,
         history: [...state.history, entry],
       };
     }
@@ -504,7 +685,30 @@ function reducer(state: GameState, action: Action): GameState {
     case "MOVE_TO_GY": {
       const sp = state.spellLog.find(x => x.id === action.spellId);
       if (!sp) return state;
-      const gyEntry: GraveyardEntry = { id: `gy-${Date.now()}`, name: sp.name, type: sp.type, turnNumber: state.turnNumber, phase: PHASES[state.phaseIndex], timestamp: Date.now(), source: action.source, playerId: sp.playerId };
+      const gyEntry: GraveyardEntry = {
+        id: `gy-${Date.now()}`,
+        name: sp.name,
+        type: sp.type,
+        turnNumber: state.turnNumber,
+        phase: PHASES[state.phaseIndex],
+        timestamp: Date.now(),
+        source: action.source,
+        playerId: sp.playerId,
+        spellId: sp.id,
+        supertype: sp.supertype,
+        subtype: sp.subtype,
+        subtype2: sp.subtype2,
+        isToken: sp.isToken,
+        tokenCategory: sp.tokenCategory,
+        isCommander: sp.isCommander,
+        commanderId: sp.commanderId,
+        commanderOwnerPlayerId: sp.commanderOwnerPlayerId,
+        power: sp.power,
+        toughness: sp.toughness,
+        manaValue: sp.manaValue,
+        manaCost: sp.manaCost,
+        abilities: sp.abilities,
+      };
       const entry = logEntry(state, `☠ ${sp.name} → graveyard (${action.source})`);
       const gyEvents = action.source === "died"
         ? (sp.type === "Creature" ? ["Creature dies", "Creature enters your graveyard", "Card enters your graveyard"] : ["Card enters your graveyard"])
@@ -516,10 +720,12 @@ function reducer(state: GameState, action: Action): GameState {
       const firedUpdated = recordEventReminderFires(state.reminders, firedR);
       const finalReminders = deactivateRemindersForSpell(firedUpdated, action.spellId);
       const newInstances: ReminderFireInstance[] = firedR.map(r => ({ id: `fire-${r.id}-${Date.now()}-${Math.random()}`, reminderId: r.id, firedPhase: currentPhase, firedTurn: state.turnNumber, triggeredByUser: state.isMyTurn }));
+      const commanders = state.commanders.map(c => c.spellId === action.spellId || c.id === sp.commanderId ? { ...c, currentZone: "graveyard" as const, spellId: action.spellId } : c);
       return {
         ...state,
         spellLog: state.spellLog.map(x => x.id === action.spellId ? { ...x, zone: "graveyard" as const } : x),
         graveyard: [...state.graveyard, gyEntry],
+        commanders,
         reminders: finalReminders,
         pendingReminderFires: [...state.pendingReminderFires, ...newInstances],
         history: [...state.history, entry],
@@ -528,13 +734,37 @@ function reducer(state: GameState, action: Action): GameState {
     case "MOVE_TO_EXILE": {
       const sp = state.spellLog.find(x => x.id === action.spellId);
       if (!sp) return state;
-      const exEntry: ExileEntry = { id: `ex-${Date.now()}`, name: sp.name, type: sp.type, turnNumber: state.turnNumber, phase: PHASES[state.phaseIndex], timestamp: Date.now(), playerId: sp.playerId };
+      const exEntry: ExileEntry = {
+        id: `ex-${Date.now()}`,
+        name: sp.name,
+        type: sp.type,
+        turnNumber: state.turnNumber,
+        phase: PHASES[state.phaseIndex],
+        timestamp: Date.now(),
+        playerId: sp.playerId,
+        spellId: sp.id,
+        supertype: sp.supertype,
+        subtype: sp.subtype,
+        subtype2: sp.subtype2,
+        isToken: sp.isToken,
+        tokenCategory: sp.tokenCategory,
+        isCommander: sp.isCommander,
+        commanderId: sp.commanderId,
+        commanderOwnerPlayerId: sp.commanderOwnerPlayerId,
+        power: sp.power,
+        toughness: sp.toughness,
+        manaValue: sp.manaValue,
+        manaCost: sp.manaCost,
+        abilities: sp.abilities,
+      };
       const entry = logEntry(state, `↗ ${sp.name} → exile`);
       const finalReminders = deactivateRemindersForSpell(state.reminders, action.spellId);
+      const commanders = state.commanders.map(c => c.spellId === action.spellId || c.id === sp.commanderId ? { ...c, currentZone: "exile" as const, spellId: action.spellId } : c);
       return {
         ...state,
         spellLog: state.spellLog.map(x => x.id === action.spellId ? { ...x, zone: "exile" as const } : x),
         exile: [...state.exile, exEntry],
+        commanders,
         reminders: finalReminders,
         history: [...state.history, entry],
       };
@@ -542,16 +772,100 @@ function reducer(state: GameState, action: Action): GameState {
     case "RETURN_FROM_GY": {
       const gy = state.graveyard.find(x => x.id === action.gyEntryId);
       if (!gy) return state;
-      const returned: CastSpell = { id: `spell-${Date.now()}`, name: gy.name, type: gy.type, turnNumber: state.turnNumber, phase: PHASES[state.phaseIndex], zone: "active", isToken: false };
+      const commander = gy.commanderId
+        ? state.commanders.find(c => c.id === gy.commanderId)
+        : state.commanders.find(c => (gy.spellId && c.spellId === gy.spellId) || (gy.isCommander && c.name === gy.name));
+      const returnedId = `spell-${Date.now()}-${Math.random()}`;
+      const returned: CastSpell = {
+        id: returnedId,
+        name: gy.name,
+        type: gy.type,
+        supertype: gy.supertype,
+        subtype: gy.subtype,
+        subtype2: gy.subtype2,
+        turnNumber: state.turnNumber,
+        phase: PHASES[state.phaseIndex],
+        zone: "active",
+        isToken: gy.isToken ?? false,
+        tokenCategory: gy.tokenCategory,
+        playerId: gy.playerId,
+        isCommander: gy.isCommander ?? !!commander,
+        commanderId: gy.commanderId ?? commander?.id,
+        commanderOwnerPlayerId: gy.commanderOwnerPlayerId ?? commander?.ownerPlayerId,
+        power: gy.power,
+        toughness: gy.toughness,
+        manaValue: gy.manaValue,
+        manaCost: gy.manaCost,
+        abilities: gy.abilities,
+      };
       const entry = logEntry(state, `↩ Returned to battlefield: ${gy.name}`);
-      return { ...state, graveyard: state.graveyard.filter(x => x.id !== action.gyEntryId), spellLog: [...state.spellLog, returned], history: [...state.history, entry] };
+      const commanders = returned.commanderId
+        ? state.commanders.map(c => c.id === returned.commanderId ? { ...c, currentZone: "battlefield" as const, spellId: returnedId } : c)
+        : state.commanders;
+      return { ...state, graveyard: state.graveyard.filter(x => x.id !== action.gyEntryId), spellLog: [...state.spellLog, returned], commanders, history: [...state.history, entry] };
     }
     case "RETURN_FROM_EXILE": {
       const ex = state.exile.find(x => x.id === action.exileEntryId);
       if (!ex) return state;
-      const returned: CastSpell = { id: `spell-${Date.now()}`, name: ex.name, type: ex.type, turnNumber: state.turnNumber, phase: PHASES[state.phaseIndex], zone: "active", isToken: false };
+      const commander = ex.commanderId
+        ? state.commanders.find(c => c.id === ex.commanderId)
+        : state.commanders.find(c => (ex.spellId && c.spellId === ex.spellId) || (ex.isCommander && c.name === ex.name));
+      const returnedId = `spell-${Date.now()}-${Math.random()}`;
+      const returned: CastSpell = {
+        id: returnedId,
+        name: ex.name,
+        type: ex.type,
+        supertype: ex.supertype,
+        subtype: ex.subtype,
+        subtype2: ex.subtype2,
+        turnNumber: state.turnNumber,
+        phase: PHASES[state.phaseIndex],
+        zone: "active",
+        isToken: ex.isToken ?? false,
+        tokenCategory: ex.tokenCategory,
+        playerId: ex.playerId,
+        isCommander: ex.isCommander ?? !!commander,
+        commanderId: ex.commanderId ?? commander?.id,
+        commanderOwnerPlayerId: ex.commanderOwnerPlayerId ?? commander?.ownerPlayerId,
+        power: ex.power,
+        toughness: ex.toughness,
+        manaValue: ex.manaValue,
+        manaCost: ex.manaCost,
+        abilities: ex.abilities,
+      };
       const entry = logEntry(state, `↩ Returned from exile: ${ex.name}`);
-      return { ...state, exile: state.exile.filter(x => x.id !== action.exileEntryId), spellLog: [...state.spellLog, returned], history: [...state.history, entry] };
+      const commanders = returned.commanderId
+        ? state.commanders.map(c => c.id === returned.commanderId ? { ...c, currentZone: "battlefield" as const, spellId: returnedId } : c)
+        : state.commanders;
+      return { ...state, exile: state.exile.filter(x => x.id !== action.exileEntryId), spellLog: [...state.spellLog, returned], commanders, history: [...state.history, entry] };
+    }
+    case "MOVE_GY_COMMANDER_TO_COMMAND_ZONE": {
+      const gy = state.graveyard.find(x => x.id === action.gyEntryId);
+      if (!gy) return state;
+      const commander = gy.commanderId
+        ? state.commanders.find(c => c.id === gy.commanderId)
+        : state.commanders.find(c => (gy.spellId && c.spellId === gy.spellId) || (gy.isCommander && c.name === gy.name));
+      if (!commander) return state;
+      const commanders = state.commanders.map(c => c.id === commander.id ? { ...c, currentZone: "commandZone" as const, spellId: undefined } : c);
+      const spellLog = state.spellLog.map(x => ((gy.spellId && x.id === gy.spellId) || (!gy.spellId && x.commanderId === commander.id && x.zone === "graveyard"))
+        ? { ...x, zone: "commandZone" as const, attacking: false, blockedByIds: [], blockingId: null }
+        : x);
+      const entry = logEntry(state, `${commander.name} moved to command zone.`, commander.ownerPlayerId);
+      return { ...state, graveyard: state.graveyard.filter(x => x.id !== action.gyEntryId), spellLog, commanders, history: [...state.history, entry] };
+    }
+    case "MOVE_EXILE_COMMANDER_TO_COMMAND_ZONE": {
+      const ex = state.exile.find(x => x.id === action.exileEntryId);
+      if (!ex) return state;
+      const commander = ex.commanderId
+        ? state.commanders.find(c => c.id === ex.commanderId)
+        : state.commanders.find(c => (ex.spellId && c.spellId === ex.spellId) || (ex.isCommander && c.name === ex.name));
+      if (!commander) return state;
+      const commanders = state.commanders.map(c => c.id === commander.id ? { ...c, currentZone: "commandZone" as const, spellId: undefined } : c);
+      const spellLog = state.spellLog.map(x => ((ex.spellId && x.id === ex.spellId) || (!ex.spellId && x.commanderId === commander.id && x.zone === "exile"))
+        ? { ...x, zone: "commandZone" as const, attacking: false, blockedByIds: [], blockingId: null }
+        : x);
+      const entry = logEntry(state, `${commander.name} moved to command zone.`, commander.ownerPlayerId);
+      return { ...state, exile: state.exile.filter(x => x.id !== action.exileEntryId), spellLog, commanders, history: [...state.history, entry] };
     }
     case "DELETE_FROM_GY": return { ...state, graveyard: state.graveyard.filter(x => x.id !== action.gyEntryId) };
     case "DELETE_FROM_EXILE": return { ...state, exile: state.exile.filter(x => x.id !== action.exileEntryId) };
@@ -788,6 +1102,18 @@ function MenuScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
   );
 }
 
+type CommanderSetupForm = {
+  playerIndex: number;
+  name: string;
+  manaCost: ManaCost;
+  power: string;
+  toughness: string;
+};
+
+function makeCommanderSetupForm(playerIndex: number): CommanderSetupForm {
+  return { playerIndex, name: "", manaCost: emptyManaCost(), power: "", toughness: "" };
+}
+
 function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
   const [step, setStep] = useState(1);
   const [gameType, setGameType] = useState("commander");
@@ -795,6 +1121,9 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
   const [playerNames, setPlayerNames] = useState<string[]>(["Player 1", "Player 2"]);
   const [firstPlayerIdx, setFirstPlayerIdx] = useState(0);
   const [life, setLife] = useState(40);
+  const [commanderForms, setCommanderForms] = useState<CommanderSetupForm[]>(() => [makeCommanderSetupForm(0), makeCommanderSetupForm(1)]);
+  const [activeCommanderSearchIndex, setActiveCommanderSearchIndex] = useState<number | null>(null);
+  const [commanderNameSuggestions, setCommanderNameSuggestions] = useState<CardNameRecord[]>([]);
 
   const gameTypes = [
     { key: "commander", label: "Commander", life: 40, desc: "40 life, EDH format" },
@@ -809,7 +1138,79 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
       while (next.length < count) next.push(`Player ${next.length + 1}`);
       return next.slice(0, count);
     });
+    setCommanderForms(prev =>
+      Array.from({ length: count }, (_, i) => prev.find(form => form.playerIndex === i) ?? makeCommanderSetupForm(i))
+    );
+    if (activeCommanderSearchIndex !== null && activeCommanderSearchIndex >= count) {
+      setActiveCommanderSearchIndex(null);
+      setCommanderNameSuggestions([]);
+    }
     if (firstPlayerIdx >= count) setFirstPlayerIdx(0);
+  }
+
+  function updateCommanderForm(playerIndex: number, updates: Partial<Omit<CommanderSetupForm, "playerIndex">>) {
+    setCommanderForms(prev => prev.map(form => form.playerIndex === playerIndex ? { ...form, ...updates } : form));
+  }
+
+  function handleCommanderNameChange(playerIndex: number, text: string) {
+    updateCommanderForm(playerIndex, { name: text });
+    setActiveCommanderSearchIndex(playerIndex);
+    setCommanderNameSuggestions(searchCardNames(text));
+  }
+
+  function selectCommanderSuggestion(playerIndex: number, card: CardNameRecord) {
+    updateCommanderForm(playerIndex, { name: card.name });
+    setActiveCommanderSearchIndex(null);
+    setCommanderNameSuggestions([]);
+  }
+
+  function renderCommanderNameSuggestions(form: CommanderSetupForm) {
+    if (activeCommanderSearchIndex !== form.playerIndex || commanderNameSuggestions.length === 0) return null;
+    return (
+      <View style={{ backgroundColor: C.cardAlt, borderRadius: 10, borderWidth: 1, borderColor: C.border, marginTop: -8, marginBottom: 12, overflow: "hidden" }}>
+        {commanderNameSuggestions.map(card => (
+          <TouchableOpacity
+            key={card.name}
+            style={{ paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.border }}
+            onPress={() => selectCommanderSuggestion(form.playerIndex, card)}
+            activeOpacity={0.75}
+          >
+            <Text style={{ color: C.text, fontSize: 13, fontWeight: "600" }}>{card.name}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    );
+  }
+
+  function updateCommanderManaCost(playerIndex: number, key: keyof ManaCost, delta: number) {
+    setCommanderForms(prev => prev.map(form => form.playerIndex === playerIndex
+      ? { ...form, manaCost: { ...form.manaCost, [key]: Math.max(0, (form.manaCost[key] ?? 0) + delta) } }
+      : form
+    ));
+  }
+
+  function renderSetupManaCostEditor(form: CommanderSetupForm) {
+    const manaValue = getManaCostValue(form.manaCost) ?? 0;
+    return (
+      <View style={{ backgroundColor: C.cardAlt, borderWidth: 1, borderColor: C.border, borderRadius: 10, padding: 10, gap: 8, marginBottom: 12 }}>
+        {MANA_COST_TYPES.map(item => (
+          <View key={item.key} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <Text style={{ color: C.text, fontSize: 13, fontWeight: "700", flex: 1 }}>{item.label}</Text>
+            <TouchableOpacity style={[s.qtyBtn, { width: 34, height: 34 }]} onPress={() => updateCommanderManaCost(form.playerIndex, item.key, -1)}>
+              <Text style={s.lifeBtnText}>−</Text>
+            </TouchableOpacity>
+            <Text style={{ color: C.text, fontSize: 16, fontWeight: "900", minWidth: 24, textAlign: "center", fontVariant: ["tabular-nums"] }}>
+              {form.manaCost[item.key] ?? 0}
+            </Text>
+            <TouchableOpacity style={[s.qtyBtn, { width: 34, height: 34 }]} onPress={() => updateCommanderManaCost(form.playerIndex, item.key, 1)}>
+              <Text style={s.lifeBtnText}>+</Text>
+            </TouchableOpacity>
+          </View>
+        ))}
+        <Text style={s.reminderDesc}>Cost: {hasManaCost(form.manaCost) ? formatManaCostLabel(form.manaCost) : "None"}</Text>
+        <Text style={s.reminderDesc}>Mana Value: {manaValue}</Text>
+      </View>
+    );
   }
 
   function handleStartGame() {
@@ -819,7 +1220,37 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
     }));
     const ids = players.map(p => p.id);
     const turnOrder = [...ids.slice(firstPlayerIdx), ...ids.slice(0, firstPlayerIdx)];
-    dispatch({ type: "START_GAME", playerName: players[0].name, life, gameType, players, turnOrder, firstPlayerIndex: firstPlayerIdx });
+    const setupTime = Date.now();
+    const commanders: CommanderRecord[] = gameType === "commander"
+      ? commanderForms.flatMap((form, i) => {
+          const owner = players[form.playerIndex];
+          const name = form.name.trim();
+          if (!owner || !name) return [];
+          const power = parseInt(form.power, 10);
+          const toughness = parseInt(form.toughness, 10);
+          const manaCost = hasManaCost(form.manaCost) ? form.manaCost : undefined;
+          return [{
+            id: `commander-setup-${owner.id}-${i}-${setupTime}`,
+            ownerPlayerId: owner.id,
+            name,
+            type: "Creature",
+            currentZone: "commandZone" as const,
+            timesCastFromCommandZone: 0,
+            manaCost,
+            manaValue: getManaCostValue(manaCost),
+            power: !isNaN(power) ? power : undefined,
+            toughness: !isNaN(toughness) ? toughness : undefined,
+          }];
+        })
+      : [];
+    const commanderDamage: GameState["commanderDamage"] = {};
+    players.forEach(player => {
+      commanderDamage[player.id] = {};
+      commanders.forEach(commander => {
+        commanderDamage[player.id][commander.id] = 0;
+      });
+    });
+    dispatch({ type: "START_GAME", playerName: players[0].name, life, gameType, players, turnOrder, firstPlayerIndex: firstPlayerIdx, commanders, commanderDamage });
   }
 
   const canAdvance1 = true;
@@ -841,7 +1272,7 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
           <>
             <Text style={s.sectionLabel}>Game Type</Text>
             {gameTypes.map(gt => (
-              <TouchableOpacity key={gt.key} style={[s.gameTypeCard, gameType === gt.key && s.gameTypeCardActive]} onPress={() => { setGameType(gt.key); setLife(gt.life); }}>
+              <TouchableOpacity key={gt.key} style={[s.gameTypeCard, gameType === gt.key && s.gameTypeCardActive]} onPress={() => { setGameType(gt.key); setLife(gt.life); setActiveCommanderSearchIndex(null); setCommanderNameSuggestions([]); }}>
                 <Text style={[s.gameTypeLabel, gameType === gt.key && { color: C.text }]}>{gt.label}</Text>
                 <Text style={s.gameTypeDesc}>{gt.desc}</Text>
               </TouchableOpacity>
@@ -911,6 +1342,53 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
                 </TouchableOpacity>
               ))}
             </View>
+            {gameType === "commander" && (
+              <View style={{ marginTop: 12, marginBottom: 8 }}>
+                <Text style={s.sectionLabel}>Commanders</Text>
+                <Text style={[s.reminderDesc, { marginBottom: 12 }]}>Optional: filled commanders start in the command zone.</Text>
+                {commanderForms.slice(0, playerCount).map(form => (
+                  <View key={form.playerIndex} style={{ backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 12, padding: 12, marginBottom: 12 }}>
+                    <Text style={[s.gameTypeLabel, { marginBottom: 4 }]}>{playerNames[form.playerIndex]?.trim() || `Player ${form.playerIndex + 1}`}</Text>
+                    <Text style={[s.gameTypeDesc, { marginBottom: 6 }]}>Commander Name</Text>
+                    <TextInput
+                      style={s.input}
+                      value={form.name}
+                      onFocus={() => {
+                        setActiveCommanderSearchIndex(form.playerIndex);
+                        setCommanderNameSuggestions(searchCardNames(form.name));
+                      }}
+                      onChangeText={text => handleCommanderNameChange(form.playerIndex, text)}
+                      placeholder="Optional commander name"
+                      placeholderTextColor={C.dim}
+                      maxLength={40}
+                    />
+                    {renderCommanderNameSuggestions(form)}
+                    <Text style={[s.gameTypeDesc, { marginBottom: 6 }]}>Mana Cost</Text>
+                    {renderSetupManaCostEditor(form)}
+                    <Text style={[s.gameTypeDesc, { marginBottom: 6 }]}>Power / Toughness optional</Text>
+                    <View style={{ flexDirection: "row", gap: 10 }}>
+                      <TextInput
+                        style={[s.input, { flex: 1, marginBottom: 0 }]}
+                        value={form.power}
+                        onChangeText={text => updateCommanderForm(form.playerIndex, { power: text })}
+                        placeholder="Power"
+                        placeholderTextColor={C.dim}
+                        keyboardType="numeric"
+                      />
+                      <Text style={{ color: C.muted, fontSize: 24, alignSelf: "center" }}>/</Text>
+                      <TextInput
+                        style={[s.input, { flex: 1, marginBottom: 0 }]}
+                        value={form.toughness}
+                        onChangeText={text => updateCommanderForm(form.playerIndex, { toughness: text })}
+                        placeholder="Toughness"
+                        placeholderTextColor={C.dim}
+                        keyboardType="numeric"
+                      />
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
             <TouchableOpacity style={s.startBtn} onPress={handleStartGame}>
               <Text style={s.startBtnText}>⚔️  Start Game</Text>
             </TouchableOpacity>
@@ -925,6 +1403,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [confirmModal, setConfirmModal] = useState(false);
   const [hubModal, setHubModal] = useState(false);
   const [battlefieldModal, setBattlefieldModal] = useState(false);
+  const [returnToBattlefieldAfterCounter, setReturnToBattlefieldAfterCounter] = useState(false);
   const [endGameModal, setEndGameModal] = useState(false);
   const [historyModal, setHistoryModal] = useState(false);
   const [historyTab, setHistoryTab] = useState<string>("all");
@@ -956,6 +1435,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [genericNote, setGenericNote] = useState("");
   const [editSpellModal, setEditSpellModal] = useState(false);
   const [activeSpell, setActiveSpell] = useState<CastSpell | null>(null);
+  const [returnToBattlefieldAfterEdit, setReturnToBattlefieldAfterEdit] = useState(false);
   const [editSpellName, setEditSpellName] = useState("");
   const [editSpellType, setEditSpellType] = useState<string | null>(null);
   const [manaModal, setManaModal] = useState(false);
@@ -988,7 +1468,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [spellSubtype2, setSpellSubtype2] = useState<string | null>(null);
   const [spellPower, setSpellPower] = useState<string>("");
   const [spellToughness, setSpellToughness] = useState<string>("");
-  const [spellManaValue, setSpellManaValue] = useState<string>("");
+  const [spellManaCost, setSpellManaCost] = useState<ManaCost>(() => emptyManaCost());
   const [spellAbilities, setSpellAbilities] = useState<string[]>([]);
   const [spellLoyalty, setSpellLoyalty] = useState<string>("");
   const [spellDefense, setSpellDefense] = useState<string>("");
@@ -1009,6 +1489,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [shownPhaseReminderKeys, setShownPhaseReminderKeys] = useState<string[]>([]);
   const [lifeCounterModal, setLifeCounterModal] = useState(false);
   const [lifeCounterHint, setLifeCounterHint] = useState<string | null>(null);
+  const [commanderDamageEdit, setCommanderDamageEdit] = useState<{ defendingPlayerId: string; commanderId: string; amount: number } | null>(null);
   // Unified reminder builder state
   const [ubName, setUbName] = useState("");
   const [ubNameSuggestions, setUbNameSuggestions] = useState<CardNameRecord[]>([]);
@@ -1169,13 +1650,93 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
 
   function markAllMissed() { unresolved.forEach(r => dispatch({ type: "MISS_REMINDER", id: r.id })); setConfirmModal(false); dispatch({ type: "LOCK_PHASE" }); }
 
+  function manaCostFromSpell(spell: Pick<CastSpell, "manaCost" | "manaValue">): ManaCost {
+    if (hasManaCost(spell.manaCost)) return { ...emptyManaCost(), ...spell.manaCost };
+    if (spell.manaValue !== undefined) return { ...emptyManaCost(), generic: Math.max(0, Math.floor(spell.manaValue)) };
+    return emptyManaCost();
+  }
+
+  function updateSpellManaCost(key: keyof ManaCost, delta: number) {
+    setSpellManaCost(prev => ({
+      ...prev,
+      [key]: Math.max(0, (prev[key] ?? 0) + delta),
+    }));
+  }
+
+  function getSpellManaCostForSave(): { manaCost?: ManaCost; manaValue?: number } {
+    const manaCost = hasManaCost(spellManaCost) ? spellManaCost : undefined;
+    return { manaCost, manaValue: getManaCostValue(manaCost) };
+  }
+
+  function getSpellCostMeta(spell: Pick<CastSpell, "manaCost" | "manaValue">): string | null {
+    const manaValue = getManaCostValue(spell.manaCost, spell.manaValue);
+    if (hasManaCost(spell.manaCost)) return `Cost ${formatManaCostLabel(spell.manaCost)} · MV ${manaValue ?? 0}`;
+    return manaValue !== undefined ? `MV ${manaValue}` : null;
+  }
+
+  function openEditSpellModal(spell: CastSpell, returnToBattlefield = false) {
+    setActiveSpell(spell);
+    setEditSpellName(spell.name);
+    setEditSpellType(spell.type);
+    setSpellSupertype(spell.supertype ?? null);
+    setSpellSubtype(spell.subtype ?? null);
+    setSpellSubtype2(spell.subtype2 ?? null);
+    setSpellPower(spell.power?.toString() ?? "");
+    setSpellToughness(spell.toughness?.toString() ?? "");
+    setSpellManaCost(manaCostFromSpell(spell));
+    setSpellAbilities(spell.abilities ?? []);
+    setSpellLoyalty((spell.currentLoyalty ?? spell.startingLoyalty)?.toString() ?? "");
+    setSpellDefense((spell.currentDefense ?? spell.startingDefense)?.toString() ?? "");
+    setSpellProduces(spell.produces ?? null);
+    setSpellAttachedTo(spell.attachedTo ?? "");
+    setSpellEffectNote(spell.effectNote ?? "");
+    setSubtypeSearch("");
+    setReturnToBattlefieldAfterEdit(returnToBattlefield);
+    setEditSpellModal(true);
+  }
+
+  function closeEditSpellModal(reopenBattlefield = true) {
+    setEditSpellModal(false);
+    if (reopenBattlefield && returnToBattlefieldAfterEdit) {
+      setReturnToBattlefieldAfterEdit(false);
+      setBattlefieldModal(true);
+    }
+  }
+
+  function renderManaCostEditor() {
+    const manaValue = getManaCostValue(spellManaCost) ?? 0;
+    return (
+      <View style={{ marginBottom: 16 }}>
+        <Text style={s.sectionLabel}>Mana Cost (optional)</Text>
+        <View style={{ backgroundColor: C.cardAlt, borderWidth: 1, borderColor: C.border, borderRadius: 10, padding: 10, gap: 8 }}>
+          {MANA_COST_TYPES.map(item => (
+            <View key={item.key} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <Text style={{ color: C.text, fontSize: 13, fontWeight: "700", flex: 1 }}>{item.label}</Text>
+              <TouchableOpacity style={[s.qtyBtn, { width: 34, height: 34 }]} onPress={() => updateSpellManaCost(item.key, -1)}>
+                <Text style={s.lifeBtnText}>−</Text>
+              </TouchableOpacity>
+              <Text style={{ color: C.text, fontSize: 16, fontWeight: "900", minWidth: 24, textAlign: "center", fontVariant: ["tabular-nums"] }}>
+                {spellManaCost[item.key] ?? 0}
+              </Text>
+              <TouchableOpacity style={[s.qtyBtn, { width: 34, height: 34 }]} onPress={() => updateSpellManaCost(item.key, 1)}>
+                <Text style={s.lifeBtnText}>+</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+          <Text style={s.reminderDesc}>Cost: {hasManaCost(spellManaCost) ? formatManaCostLabel(spellManaCost) : "None"}</Text>
+          <Text style={s.reminderDesc}>Mana Value: {manaValue}</Text>
+        </View>
+      </View>
+    );
+  }
+
   function resetSpellDetailForm() {
     setSpellSupertype(null);
     setSpellSubtype(null);
     setSpellSubtype2(null);
     setSpellPower("");
     setSpellToughness("");
-    setSpellManaValue("");
+    setSpellManaCost(emptyManaCost());
     setSpellAbilities([]);
     setSpellLoyalty("");
     setSpellDefense("");
@@ -1331,6 +1892,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   ];
 
   function handleEvent(id: string) {
+    if (id !== "counter-added") setReturnToBattlefieldAfterCounter(false);
     if (id === "spell-cast") { setSelectedSpell(null); setSpellName(""); setSpellNameSuggestions([]); setSpellModal(true); }
     else if (id === "land-played") { setLandQty(1); setLandModal(true); }
     else if (id === "cards-drawn-discarded") { setDrawQty(0); setDiscardQty(0); setDrawModal(true); }
@@ -1348,6 +1910,60 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
     setCounterType("+1/+1");
     setCounterHint(null);
     setCounterAmount(1);
+    if (returnToBattlefieldAfterCounter) {
+      setReturnToBattlefieldAfterCounter(false);
+      setBattlefieldModal(true);
+    }
+  }
+
+  function closeHubModal() {
+    setHubModal(false);
+    if (returnToBattlefieldAfterCounter) {
+      setReturnToBattlefieldAfterCounter(false);
+      setBattlefieldModal(true);
+    }
+  }
+
+  function closeHubEventsModal() {
+    setHubEventsModal(false);
+    if (returnToBattlefieldAfterCounter) {
+      setReturnToBattlefieldAfterCounter(false);
+      setBattlefieldModal(true);
+    }
+  }
+
+  function returnToBattlefieldIfNeeded() {
+    if (returnToBattlefieldAfterCounter) {
+      setReturnToBattlefieldAfterCounter(false);
+      setBattlefieldModal(true);
+    }
+  }
+
+  function openGyExileModalFromHub() {
+    setHubModal(false);
+    setGyTab("graveyard");
+    setGyModal(true);
+  }
+
+  function closeGyModal() {
+    setGyModal(false);
+    returnToBattlefieldIfNeeded();
+  }
+
+  function closeGyEntryActionModal() {
+    setGyEntryActionModal(false);
+    returnToBattlefieldIfNeeded();
+  }
+
+  function closeExileEntryActionModal() {
+    setExileEntryActionModal(false);
+    returnToBattlefieldIfNeeded();
+  }
+
+  function applyCounterChange(delta: number) {
+    if (!counterTargetId) return;
+    dispatch({ type: "CHANGE_CREATURE_COUNTER", spellId: counterTargetId, counterType, delta });
+    if (returnToBattlefieldAfterCounter) closeCounterModal();
   }
 
   function getCurrentCreaturePT(creature: CastSpell) {
@@ -1590,7 +2206,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                     <Text style={{ fontSize: 18 }}>{typeIcons[sp.type] ?? "★"}</Text>
                     <View style={{ flex: 1 }}>
                       <Text style={s.reminderTitle}>{sp.name}</Text>
-                      <Text style={s.reminderDesc}>{[sp.supertype, sp.type, (sp.subtype || sp.subtype2) ? `— ${[sp.subtype, sp.subtype2].filter(Boolean).join("/")}` : null, (sp.power !== undefined && sp.toughness !== undefined) ? `${sp.power}/${sp.toughness}` : null, sp.currentLoyalty !== undefined ? `👁 ${sp.currentLoyalty}` : null, sp.currentDefense !== undefined ? `⚔ ${sp.currentDefense}` : null, `· T${sp.turnNumber}`, sp.zone !== "active" ? `· ${sp.zone === "graveyard" ? "GY" : "Exile"}` : null, sp.playerId ? `· ${state.players.find(p => p.id === sp.playerId)?.name ?? sp.playerId}` : null].filter(Boolean).join(" ")}</Text>
+                      <Text style={s.reminderDesc}>{[sp.supertype, sp.type, (sp.subtype || sp.subtype2) ? `— ${[sp.subtype, sp.subtype2].filter(Boolean).join("/")}` : null, (sp.power !== undefined && sp.toughness !== undefined) ? `${sp.power}/${sp.toughness}` : null, getSpellCostMeta(sp), sp.currentLoyalty !== undefined ? `👁 ${sp.currentLoyalty}` : null, sp.currentDefense !== undefined ? `⚔ ${sp.currentDefense}` : null, `· T${sp.turnNumber}`, sp.zone !== "active" ? `· ${sp.zone === "graveyard" ? "GY" : "Exile"}` : null, sp.playerId ? `· ${state.players.find(p => p.id === sp.playerId)?.name ?? sp.playerId}` : null].filter(Boolean).join(" ")}</Text>
                     </View>
                   </View>
                 );
@@ -1786,9 +2402,9 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
       </Modal>
 
       {/* HUB MODAL */}
-      <Modal visible={hubModal} transparent animationType="slide" onRequestClose={() => setHubModal(false)}>
+      <Modal visible={hubModal} transparent animationType="slide" onRequestClose={closeHubModal}>
         <View style={{ flex: 1, justifyContent: "flex-end" }}>
-          <TouchableOpacity style={s.backdrop} onPress={() => setHubModal(false)} />
+          <TouchableOpacity style={s.backdrop} onPress={closeHubModal} />
           <View style={s.sheet}>
             <View style={s.handle} />
             <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16 }}>
@@ -1816,6 +2432,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 { icon: "✦", label: "Spell Log", sub: `${state.spellLog.length} spells`, action: () => { setHubModal(false); setSpellLogModal(true); } },
                 !isOppTurn ? { icon: "↩", label: "Undo Last", sub: "Coming soon", action: () => {} } : null,
                 { icon: "⚔️", label: "Battlefield", sub: "View the field", action: () => { setHubModal(false); setBattlefieldModal(true); } },
+                { icon: "☠", label: "GY / Exile", sub: `GY ${state.graveyard.length} · Exile ${state.exile.length}`, action: openGyExileModalFromHub },
                 { icon: "💎", label: "Mana Pool", sub: "Track mana", action: () => { setHubModal(false); setManaModal(true); } },
                 { icon: "🔔", label: "Reminders", sub: `${state.reminders.filter(r => r.status === "pending").length} pending`, action: () => { setHubModal(false); setRemindersListModal(true); } },
                 { icon: "⚡", label: "Game Events", sub: "Any player · any phase", action: () => { setHubEventOwner(state.turnOrder[state.currentPlayerIndex]); setHubModal(false); setHubEventsModal(true); } },
@@ -1830,15 +2447,15 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 );
               })}
             </View>
-            <TouchableOpacity style={s.closeBtn} onPress={() => setHubModal(false)}><Text style={s.closeBtnText}>Close</Text></TouchableOpacity>
+            <TouchableOpacity style={s.closeBtn} onPress={closeHubModal}><Text style={s.closeBtnText}>Close</Text></TouchableOpacity>
           </View>
         </View>
       </Modal>
 
       {/* HUB GAME EVENTS MODAL */}
-      <Modal visible={hubEventsModal} transparent animationType="slide" onRequestClose={() => setHubEventsModal(false)}>
+      <Modal visible={hubEventsModal} transparent animationType="slide" onRequestClose={closeHubEventsModal}>
         <View style={{ flex: 1, justifyContent: "flex-end" }}>
-          <TouchableOpacity style={s.backdrop} onPress={() => setHubEventsModal(false)} />
+          <TouchableOpacity style={s.backdrop} onPress={closeHubEventsModal} />
           <View style={[s.sheet, { maxHeight: "80%", flex: 1 }]}>
             <View style={s.handle} />
             <Text style={s.sheetTitle}>Game Events</Text>
@@ -1904,7 +2521,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
               })}
             </View>
 
-            <TouchableOpacity style={[s.closeBtn, { marginTop: 8 }]} onPress={() => setHubEventsModal(false)}>
+            <TouchableOpacity style={[s.closeBtn, { marginTop: 8 }]} onPress={closeHubEventsModal}>
               <Text style={s.closeBtnText}>Cancel</Text>
             </TouchableOpacity>
           </View>
@@ -1976,7 +2593,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 style={[s.modalConfirmBtn, { backgroundColor: C.dangerDim, borderWidth: 1, borderColor: C.danger }, !counterTargetId && { opacity: 0.4 }]}
                 disabled={!counterTargetId}
                 onPress={() => {
-                  if (counterTargetId) dispatch({ type: "CHANGE_CREATURE_COUNTER", spellId: counterTargetId, counterType, delta: -1 });
+                  applyCounterChange(-1);
                 }}
               >
                 <Text style={s.startBtnText}>Remove</Text>
@@ -1985,7 +2602,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 style={[s.modalConfirmBtn, !counterTargetId && { opacity: 0.4 }]}
                 disabled={!counterTargetId}
                 onPress={() => {
-                  if (counterTargetId) dispatch({ type: "CHANGE_CREATURE_COUNTER", spellId: counterTargetId, counterType, delta: counterAmount });
+                  applyCounterChange(counterAmount);
                 }}
               >
                 <Text style={s.startBtnText}>Add</Text>
@@ -2189,7 +2806,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                           <Text style={{ fontSize: 18 }}>{typeIcons[sp.type] ?? "★"}</Text>
                           <View style={{ flex: 1 }}>
                             <Text style={s.reminderTitle}>{sp.name}</Text>
-                            <Text style={s.reminderDesc}>{[sp.supertype, sp.type, (sp.subtype || sp.subtype2) ? `— ${[sp.subtype, sp.subtype2].filter(Boolean).join("/")}` : null, (sp.power !== undefined && sp.toughness !== undefined) ? `${sp.power}/${sp.toughness}` : null, sp.currentLoyalty !== undefined ? `👁 ${sp.currentLoyalty}` : null, `· T${sp.turnNumber}`, sp.playerId ? `· ${state.players.find(p => p.id === sp.playerId)?.name ?? sp.playerId}` : null].filter(Boolean).join(" ")}</Text>
+                            <Text style={s.reminderDesc}>{[sp.supertype, sp.type, (sp.subtype || sp.subtype2) ? `— ${[sp.subtype, sp.subtype2].filter(Boolean).join("/")}` : null, (sp.power !== undefined && sp.toughness !== undefined) ? `${sp.power}/${sp.toughness}` : null, getSpellCostMeta(sp), sp.currentLoyalty !== undefined ? `👁 ${sp.currentLoyalty}` : null, `· T${sp.turnNumber}`, sp.playerId ? `· ${state.players.find(p => p.id === sp.playerId)?.name ?? sp.playerId}` : null].filter(Boolean).join(" ")}</Text>
                           </View>
                         </TouchableOpacity>
                       );
@@ -2209,7 +2826,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                           <Text style={{ fontSize: 18 }}>{typeIcons[sp.type] ?? "★"}</Text>
                           <View style={{ flex: 1 }}>
                             <Text style={s.reminderTitle}>{sp.name}</Text>
-                            <Text style={s.reminderDesc}>{[sp.supertype, sp.type, `· T${sp.turnNumber}`, sp.zone === "graveyard" ? "· GY" : "· Exile", sp.playerId ? `· ${state.players.find(p => p.id === sp.playerId)?.name ?? sp.playerId}` : null].filter(Boolean).join(" ")}</Text>
+                            <Text style={s.reminderDesc}>{[sp.supertype, sp.type, getSpellCostMeta(sp), `· T${sp.turnNumber}`, sp.zone === "graveyard" ? "· GY" : "· Exile", sp.playerId ? `· ${state.players.find(p => p.id === sp.playerId)?.name ?? sp.playerId}` : null].filter(Boolean).join(" ")}</Text>
                           </View>
                         </View>
                       );
@@ -2445,23 +3062,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             {!(activeSpell?.type === "Token" && activeSpell?.tokenCategory === "resource") && (<>
               <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]} onPress={() => {
                 if (activeSpell) {
-                  setEditSpellName(activeSpell.name);
-                  setEditSpellType(activeSpell.type);
-                  setSpellSupertype(activeSpell.supertype ?? null);
-                  setSpellSubtype(activeSpell.subtype ?? null);
-                  setSpellSubtype2(activeSpell.subtype2 ?? null);
-                  setSpellPower(activeSpell.power?.toString() ?? "");
-                  setSpellToughness(activeSpell.toughness?.toString() ?? "");
-                  setSpellManaValue(activeSpell.manaValue?.toString() ?? "");
-                  setSpellAbilities(activeSpell.abilities ?? []);
-                  setSpellLoyalty(activeSpell.currentLoyalty?.toString() ?? "");
-                  setSpellDefense(activeSpell.currentDefense?.toString() ?? "");
-                  setSpellProduces(activeSpell.produces ?? null);
-                  setSpellAttachedTo(activeSpell.attachedTo ?? "");
-                  setSpellEffectNote(activeSpell.effectNote ?? "");
-                  setSubtypeSearch("");
                   setSpellActionModal(false);
-                  setEditSpellModal(true);
+                  openEditSpellModal(activeSpell);
                 }
               }}>
                 <Text style={s.confirmBtnText}>✎ Edit</Text>
@@ -2478,17 +3080,25 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
       </Modal>
 
       {/* GY ENTRY ACTION MODAL */}
-      <Modal visible={gyEntryActionModal} transparent animationType="fade" onRequestClose={() => setGyEntryActionModal(false)}>
+      <Modal visible={gyEntryActionModal} transparent animationType="fade" onRequestClose={closeGyEntryActionModal}>
         <View style={s.centeredOverlay}>
           <View style={s.centeredModal}>
             <Text style={{ fontSize: 22, marginBottom: 4 }}>{typeIcons[activeGYEntry?.type ?? ""] ?? "★"}</Text>
             <Text style={s.sheetTitle}>{activeGYEntry?.name}</Text>
             <Text style={[s.reminderDesc, { textAlign: "center", marginBottom: 16 }]}>{activeGYEntry?.type}</Text>
-            <TouchableOpacity style={[s.actionBtn, s.confirmBtnOk, { marginBottom: 8 }]} onPress={() => { if (activeGYEntry) dispatch({ type: "RETURN_FROM_GY", gyEntryId: activeGYEntry.id }); setGyEntryActionModal(false); }}>
+            <TouchableOpacity style={[s.actionBtn, s.confirmBtnOk, { marginBottom: 8 }]} onPress={() => { if (activeGYEntry) dispatch({ type: "RETURN_FROM_GY", gyEntryId: activeGYEntry.id }); closeGyEntryActionModal(); }}>
               <Text style={s.confirmBtnText}>↩ Return to Battlefield</Text>
             </TouchableOpacity>
+            {activeGYEntry?.isCommander && (
+              <TouchableOpacity
+                style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]}
+                onPress={() => { if (activeGYEntry) dispatch({ type: "MOVE_GY_COMMANDER_TO_COMMAND_ZONE", gyEntryId: activeGYEntry.id }); closeGyEntryActionModal(); }}
+              >
+                <Text style={s.confirmBtnText}>Move to Command Zone</Text>
+              </TouchableOpacity>
+            )}
             {activeGYEntry?.type === "Instant" && (
-              <TouchableOpacity style={[s.actionBtn, s.confirmBtnOk, { marginBottom: 8 }]} onPress={() => { if (activeGYEntry) dispatch({ type: "RETURN_FROM_GY", gyEntryId: activeGYEntry.id }); setGyEntryActionModal(false); }}>
+              <TouchableOpacity style={[s.actionBtn, s.confirmBtnOk, { marginBottom: 8 }]} onPress={() => { if (activeGYEntry) dispatch({ type: "RETURN_FROM_GY", gyEntryId: activeGYEntry.id }); closeGyEntryActionModal(); }}>
                 <Text style={s.confirmBtnText}>⚡ Flashback</Text>
               </TouchableOpacity>
             )}
@@ -2499,14 +3109,14 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 if (match) dispatch({ type: "MOVE_TO_EXILE", spellId: match.id });
                 else dispatch({ type: "LOG", message: `↗ ${activeGYEntry.name} → exile` });
               }
-              setGyEntryActionModal(false);
+              closeGyEntryActionModal();
             }}>
               <Text style={[s.confirmBtnText, { color: C.warning }]}>↗ Exile</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[s.actionBtn, s.confirmBtnWarn, { marginBottom: 8 }]} onPress={() => { if (activeGYEntry) dispatch({ type: "DELETE_FROM_GY", gyEntryId: activeGYEntry.id }); setGyEntryActionModal(false); }}>
+            <TouchableOpacity style={[s.actionBtn, s.confirmBtnWarn, { marginBottom: 8 }]} onPress={() => { if (activeGYEntry) dispatch({ type: "DELETE_FROM_GY", gyEntryId: activeGYEntry.id }); closeGyEntryActionModal(); }}>
               <Text style={s.confirmBtnText}>✕ Delete</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[s.actionBtn, s.closeBtnStyle]} onPress={() => setGyEntryActionModal(false)}>
+            <TouchableOpacity style={[s.actionBtn, s.closeBtnStyle]} onPress={closeGyEntryActionModal}>
               <Text style={s.closeBtnText}>Cancel</Text>
             </TouchableOpacity>
           </View>
@@ -2514,19 +3124,27 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
       </Modal>
 
       {/* EXILE ENTRY ACTION MODAL */}
-      <Modal visible={exileEntryActionModal} transparent animationType="fade" onRequestClose={() => setExileEntryActionModal(false)}>
+      <Modal visible={exileEntryActionModal} transparent animationType="fade" onRequestClose={closeExileEntryActionModal}>
         <View style={s.centeredOverlay}>
           <View style={s.centeredModal}>
             <Text style={{ fontSize: 22, marginBottom: 4 }}>{typeIcons[activeExileEntry?.type ?? ""] ?? "★"}</Text>
             <Text style={s.sheetTitle}>{activeExileEntry?.name}</Text>
             <Text style={[s.reminderDesc, { textAlign: "center", marginBottom: 16 }]}>{activeExileEntry?.type}</Text>
-            <TouchableOpacity style={[s.actionBtn, s.confirmBtnOk, { marginBottom: 8 }]} onPress={() => { if (activeExileEntry) dispatch({ type: "RETURN_FROM_EXILE", exileEntryId: activeExileEntry.id }); setExileEntryActionModal(false); }}>
+            <TouchableOpacity style={[s.actionBtn, s.confirmBtnOk, { marginBottom: 8 }]} onPress={() => { if (activeExileEntry) dispatch({ type: "RETURN_FROM_EXILE", exileEntryId: activeExileEntry.id }); closeExileEntryActionModal(); }}>
               <Text style={s.confirmBtnText}>↩ Return to Battlefield</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[s.actionBtn, s.confirmBtnWarn, { marginBottom: 8 }]} onPress={() => { if (activeExileEntry) dispatch({ type: "DELETE_FROM_EXILE", exileEntryId: activeExileEntry.id }); setExileEntryActionModal(false); }}>
+            {activeExileEntry?.isCommander && (
+              <TouchableOpacity
+                style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]}
+                onPress={() => { if (activeExileEntry) dispatch({ type: "MOVE_EXILE_COMMANDER_TO_COMMAND_ZONE", exileEntryId: activeExileEntry.id }); closeExileEntryActionModal(); }}
+              >
+                <Text style={s.confirmBtnText}>Move to Command Zone</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={[s.actionBtn, s.confirmBtnWarn, { marginBottom: 8 }]} onPress={() => { if (activeExileEntry) dispatch({ type: "DELETE_FROM_EXILE", exileEntryId: activeExileEntry.id }); closeExileEntryActionModal(); }}>
               <Text style={s.confirmBtnText}>✕ Delete</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[s.actionBtn, s.closeBtnStyle]} onPress={() => setExileEntryActionModal(false)}>
+            <TouchableOpacity style={[s.actionBtn, s.closeBtnStyle]} onPress={closeExileEntryActionModal}>
               <Text style={s.closeBtnText}>Cancel</Text>
             </TouchableOpacity>
           </View>
@@ -2534,9 +3152,9 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
       </Modal>
 
       {/* GY / EXILE MODAL */}
-      <Modal visible={gyModal} transparent animationType="slide" onRequestClose={() => setGyModal(false)}>
+      <Modal visible={gyModal} transparent animationType="slide" onRequestClose={closeGyModal}>
         <View style={{ flex: 1, justifyContent: "flex-end" }}>
-          <TouchableOpacity style={s.backdrop} onPress={() => setGyModal(false)} />
+          <TouchableOpacity style={s.backdrop} onPress={closeGyModal} />
           <View style={[s.sheet, { maxHeight: "80%", flex: 1 }]}>
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
               <View style={s.handle} />
@@ -2595,7 +3213,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                       <Text style={{ fontSize: 20 }}>{typeIcons[entry.type] ?? "★"}</Text>
                       <View style={{ flex: 1 }}>
                         <Text style={s.reminderTitle}>{entry.name}</Text>
-                        <Text style={s.reminderDesc}>{[entry.type, `T${entry.turnNumber}`, entry.source, entry.playerId ? state.players.find(p => p.id === entry.playerId)?.name : null].filter(Boolean).join(" · ")}</Text>
+                        <Text style={s.reminderDesc}>{[entry.type, entry.isCommander ? "Commander" : null, `T${entry.turnNumber}`, entry.source, entry.playerId ? state.players.find(p => p.id === entry.playerId)?.name : null].filter(Boolean).join(" · ")}</Text>
                       </View>
                       <Text style={{ fontSize: 18, color: C.dim }}>›</Text>
                     </TouchableOpacity>
@@ -2615,7 +3233,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                       <Text style={{ fontSize: 20 }}>{typeIcons[entry.type] ?? "★"}</Text>
                       <View style={{ flex: 1 }}>
                         <Text style={s.reminderTitle}>{entry.name}</Text>
-                        <Text style={s.reminderDesc}>{[entry.type, `T${entry.turnNumber}`, entry.playerId ? state.players.find(p => p.id === entry.playerId)?.name : null].filter(Boolean).join(" · ")}</Text>
+                        <Text style={s.reminderDesc}>{[entry.type, entry.isCommander ? "Commander" : null, `T${entry.turnNumber}`, entry.playerId ? state.players.find(p => p.id === entry.playerId)?.name : null].filter(Boolean).join(" · ")}</Text>
                       </View>
                       <Text style={{ fontSize: 18, color: C.dim }}>›</Text>
                     </TouchableOpacity>
@@ -2623,7 +3241,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 </ScrollView>
               );
             })()}
-            <TouchableOpacity style={[s.closeBtn, { marginTop: 8 }]} onPress={() => setGyModal(false)}>
+            <TouchableOpacity style={[s.closeBtn, { marginTop: 8 }]} onPress={closeGyModal}>
               <Text style={s.closeBtnText}>Close</Text>
             </TouchableOpacity>
           </View>
@@ -2661,9 +3279,9 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
       </Modal>
 
       {/* EDIT SPELL MODAL */}
-      <Modal visible={editSpellModal} transparent animationType="slide" onRequestClose={() => setEditSpellModal(false)}>
+      <Modal visible={editSpellModal} transparent animationType="slide" onRequestClose={() => closeEditSpellModal()}>
         <KeyboardAvoidingView style={{ flex: 1, justifyContent: "flex-end" }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-          <TouchableOpacity style={s.backdrop} onPress={() => setEditSpellModal(false)} />
+          <TouchableOpacity style={s.backdrop} onPress={() => closeEditSpellModal()} />
           <View style={[s.sheet, { maxHeight: "92%", flex: 1 }]}>
             <View style={s.handle} />
             <Text style={s.sheetTitle}>Edit: {activeSpell?.name}</Text>
@@ -2719,6 +3337,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                   <Text style={{ color: C.muted, fontSize: 24, alignSelf: "center" }}>/</Text>
                   <TextInput style={[s.input, { flex: 1, marginBottom: 0 }]} value={spellToughness} onChangeText={setSpellToughness} placeholder="Toughness" placeholderTextColor={C.dim} keyboardType="numeric" />
                 </View>
+                {renderManaCostEditor()}
                 <Text style={s.sectionLabel}>Keyword Abilities</Text>
                 <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
                   {MTG_KEYWORD_ABILITIES.map(ab => (
@@ -2758,12 +3377,14 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
               </TouchableOpacity>
             </ScrollView>
             <View style={s.modalBtnRow}>
-              <TouchableOpacity style={s.modalCancelBtn} onPress={() => setEditSpellModal(false)}><Text style={s.closeBtnText}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity style={s.modalCancelBtn} onPress={() => closeEditSpellModal()}><Text style={s.closeBtnText}>Cancel</Text></TouchableOpacity>
               <TouchableOpacity style={[s.modalConfirmBtn, (!editSpellType || !editSpellName.trim()) && { opacity: 0.4 }]} disabled={!editSpellType || !editSpellName.trim()}
                 onPress={() => {
                   if (activeSpell && editSpellType && editSpellName.trim()) {
                     const loyalty = parseInt(spellLoyalty, 10);
                     const defense = parseInt(spellDefense, 10);
+                    const isCreatureLikeEdit = editSpellType === "Creature" || (editSpellType === "Token" && activeSpell.tokenCategory === "creature");
+                    const manaFields = isCreatureLikeEdit ? getSpellManaCostForSave() : {};
                     dispatch({
                       type: "EDIT_SPELL",
                       id: activeSpell.id,
@@ -2774,14 +3395,20 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                         subtype: spellSubtype ?? undefined,
                         power: spellPower !== "" ? parseInt(spellPower, 10) : undefined,
                         toughness: spellToughness !== "" ? parseInt(spellToughness, 10) : undefined,
+                        ...manaFields,
                         abilities: spellAbilities.length > 0 ? spellAbilities : undefined,
                         currentLoyalty: !isNaN(loyalty) ? loyalty : undefined,
                         currentDefense: !isNaN(defense) ? defense : undefined,
                         effectNote: spellEffectNote.trim() || undefined,
                       },
                     });
-                    setEditSpellModal(false);
-                    if (eventReminderToggle) openReminderBuilderForEvent(eventForSpellType(editSpellType), editSpellName.trim());
+                    if (eventReminderToggle) {
+                      closeEditSpellModal(false);
+                      setReturnToBattlefieldAfterEdit(false);
+                      openReminderBuilderForEvent(eventForSpellType(editSpellType), editSpellName.trim());
+                    } else {
+                      closeEditSpellModal();
+                    }
                   }
                 }}>
                 <Text style={s.startBtnText}>Save Changes</Text>
@@ -2925,8 +3552,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                   <Text style={{ color: C.muted, fontSize: 24, alignSelf: "center" }}>/</Text>
                   <TextInput style={[s.input, { flex: 1, marginBottom: 0 }]} value={spellToughness} onChangeText={setSpellToughness} placeholder="Toughness" placeholderTextColor={C.dim} keyboardType="numeric" />
                 </View>
-                <Text style={s.sectionLabel}>Mana Value (optional)</Text>
-                <TextInput style={[s.input, { marginBottom: 16 }]} value={spellManaValue} onChangeText={setSpellManaValue} placeholder="e.g. 3" placeholderTextColor={C.dim} keyboardType="numeric" />
+                {renderManaCostEditor()}
                 <Text style={s.sectionLabel}>Keyword Abilities (optional)</Text>
                 <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
                   {MTG_KEYWORD_ABILITIES.map(ab => (
@@ -3008,6 +3634,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                   if (!selectedSpell) return;
                   const loyalty = parseInt(spellLoyalty, 10);
                   const defense = parseInt(spellDefense, 10);
+                  const manaFields = selectedSpell === "Creature" ? getSpellManaCostForSave() : {};
                   dispatch({
                     type: "CAST_SPELL",
                     spellData: {
@@ -3019,7 +3646,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                       isToken: false,
                       power: spellPower !== "" ? parseInt(spellPower, 10) : undefined,
                       toughness: spellToughness !== "" ? parseInt(spellToughness, 10) : undefined,
-                      manaValue: spellManaValue !== "" ? parseInt(spellManaValue, 10) : undefined,
+                      ...manaFields,
                       abilities: spellAbilities.length > 0 ? spellAbilities : undefined,
                       startingLoyalty: !isNaN(loyalty) ? loyalty : undefined,
                       currentLoyalty: !isNaN(loyalty) ? loyalty : undefined,
@@ -4210,22 +4837,108 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
               </View>
             )}
             <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
-              {state.players.map(p => (
-                <View key={p.id} style={s.manaRow}>
-                  <Text style={[s.manaLabel]}>{p.name}{p.isUser ? " (You)" : ""}</Text>
-                  <Text style={s.manaTotal}>{p.life}</Text>
-                  <TouchableOpacity style={s.manaBtn} onPress={() => dispatch({ type: "CHANGE_LIFE", delta: -1, playerId: p.id })}>
-                    <Text style={s.manaBtnText}>−</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={s.manaBtn} onPress={() => dispatch({ type: "CHANGE_LIFE", delta: 1, playerId: p.id })}>
-                    <Text style={s.manaBtnText}>+</Text>
-                  </TouchableOpacity>
-                </View>
-              ))}
+              {state.players.map(p => {
+                const commanderDamageEntries = Object.entries(state.commanderDamage[p.id] ?? {})
+                  .map(([commanderId, amount]) => ({
+                    commanderId,
+                    amount,
+                    commander: state.commanders.find(c => c.id === commanderId),
+                  }))
+                  .filter(entry => entry.amount > 0);
+                return (
+                  <View key={p.id} style={{ borderBottomWidth: 1, borderBottomColor: C.border }}>
+                    <View style={[s.manaRow, { borderBottomWidth: 0 }]}>
+                      <Text style={[s.manaLabel]}>{p.name}{p.isUser ? " (You)" : ""}</Text>
+                      <Text style={s.manaTotal}>{p.life}</Text>
+                      <TouchableOpacity style={s.manaBtn} onPress={() => dispatch({ type: "CHANGE_LIFE", delta: -1, playerId: p.id })}>
+                        <Text style={s.manaBtnText}>−</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={s.manaBtn} onPress={() => dispatch({ type: "CHANGE_LIFE", delta: 1, playerId: p.id })}>
+                        <Text style={s.manaBtnText}>+</Text>
+                      </TouchableOpacity>
+                    </View>
+                    {commanderDamageEntries.length > 0 && (
+                      <View style={{ paddingHorizontal: 4, paddingBottom: 12, gap: 4 }}>
+                        <Text style={{ color: C.warning, fontSize: 12, fontWeight: "800" }}>{p.name} Commander Damage:</Text>
+                        {commanderDamageEntries.map(entry => (
+                          <TouchableOpacity
+                            key={entry.commanderId}
+                            style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, paddingVertical: 4 }}
+                            onPress={() => setCommanderDamageEdit({ defendingPlayerId: p.id, commanderId: entry.commanderId, amount: entry.amount })}
+                            activeOpacity={0.75}
+                          >
+                            <Text style={{ color: C.muted, fontSize: 12, flex: 1 }}>
+                              {(entry.commander?.name ?? entry.commanderId)}: {entry.amount}/21
+                            </Text>
+                            <Text style={{ color: C.accent, fontSize: 11, fontWeight: "700" }}>Edit</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
             </ScrollView>
             <TouchableOpacity style={[s.closeBtn, { marginTop: 8 }]} onPress={() => { setLifeCounterModal(false); setLifeCounterHint(null); }}>
               <Text style={s.closeBtnText}>Close</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={!!commanderDamageEdit} transparent animationType="fade" onRequestClose={() => setCommanderDamageEdit(null)}>
+        <View style={s.centeredOverlay}>
+          <View style={s.centeredModal}>
+            {(() => {
+              const defender = commanderDamageEdit ? state.players.find(p => p.id === commanderDamageEdit.defendingPlayerId) : null;
+              const commander = commanderDamageEdit ? state.commanders.find(c => c.id === commanderDamageEdit.commanderId) : null;
+              return (
+                <>
+                  <Text style={[s.sheetTitle, { textAlign: "center" }]}>Edit Commander Damage</Text>
+                  <Text style={[s.reminderDesc, { textAlign: "center", marginBottom: 4 }]}>{defender?.name ?? "Player"}</Text>
+                  <Text style={[s.reminderTitle, { textAlign: "center", marginBottom: 12 }]}>{commander?.name ?? "Commander"}</Text>
+                  <Text style={[s.phaseDesc, { textAlign: "center", marginBottom: 12, color: C.muted }]}>
+                    Current damage {commanderDamageEdit?.amount ?? 0}/21
+                  </Text>
+                  <View style={s.qtyRow}>
+                    <TouchableOpacity
+                      style={s.qtyBtn}
+                      onPress={() => setCommanderDamageEdit(edit => edit ? { ...edit, amount: Math.max(0, edit.amount - 1) } : edit)}
+                    >
+                      <Text style={s.lifeBtnText}>−</Text>
+                    </TouchableOpacity>
+                    <Text style={[s.lifeVal, { fontSize: 44 }]}>{commanderDamageEdit?.amount ?? 0}</Text>
+                    <TouchableOpacity
+                      style={s.qtyBtn}
+                      onPress={() => setCommanderDamageEdit(edit => edit ? { ...edit, amount: edit.amount + 1 } : edit)}
+                    >
+                      <Text style={s.lifeBtnText}>+</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <View style={s.modalBtnRow}>
+                    <TouchableOpacity style={s.modalCancelBtn} onPress={() => setCommanderDamageEdit(null)}>
+                      <Text style={s.closeBtnText}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={s.modalConfirmBtn}
+                      onPress={() => {
+                        if (commanderDamageEdit) {
+                          dispatch({
+                            type: "SET_COMMANDER_DAMAGE",
+                            defendingPlayerId: commanderDamageEdit.defendingPlayerId,
+                            commanderId: commanderDamageEdit.commanderId,
+                            amount: commanderDamageEdit.amount,
+                          });
+                        }
+                        setCommanderDamageEdit(null);
+                      }}
+                    >
+                      <Text style={s.startBtnText}>Save</Text>
+                    </TouchableOpacity>
+                  </View>
+                </>
+              );
+            })()}
           </View>
         </View>
       </Modal>
@@ -4235,7 +4948,11 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
         onClose={() => setBattlefieldModal(false)}
         state={state}
         dispatch={dispatch}
-        onOpenHub={() => { setBattlefieldModal(false); setHubModal(true); }}
+        onOpenHub={() => { setBattlefieldModal(false); setReturnToBattlefieldAfterCounter(true); setHubModal(true); }}
+        onEditSpell={(spell) => {
+          setBattlefieldModal(false);
+          openEditSpellModal(spell, true);
+        }}
       />
     </> ); }
 

@@ -27,9 +27,12 @@ export type CastSpell = {
   subtype2?: string;
   turnNumber: number;
   phase: string;
-  zone: "active" | "graveyard" | "exile";
+  zone: "active" | "graveyard" | "exile" | "commandZone";
   isToken: boolean;
   tokenCategory?: "creature" | "resource" | "status";
+  isCommander?: boolean;
+  commanderId?: string;
+  commanderOwnerPlayerId?: string;
   // Creature
   power?: number;
   toughness?: number;
@@ -84,6 +87,23 @@ export type ManaPool = {
 
 export type Player = { id: string; name: string; isUser: boolean; life: number };
 
+export type CommanderRecord = {
+  id: string;
+  ownerPlayerId: string;
+  name: string;
+  manaValue?: number;
+  type?: string;
+  power?: number;
+  toughness?: number;
+  abilities?: string[];
+  supertype?: string;
+  subtype?: string;
+  subtype2?: string;
+  currentZone: "commandZone" | "battlefield" | "graveyard" | "exile";
+  spellId?: string;
+  timesCastFromCommandZone: number;
+};
+
 export type GameState = {
   screen: "menu" | "setup" | "game" | "opponent-turn";
   isMyTurn: boolean;
@@ -102,6 +122,12 @@ export type GameState = {
   firstPlayerIndex: number;
   opponentPhaseIndex: number;
   eventOwnerPlayerId: string | null;
+  commanders: CommanderRecord[];
+  commanderDamage: {
+    [defendingPlayerId: string]: {
+      [commanderId: string]: number;
+    };
+  };
 };
 
 export type Action =
@@ -153,6 +179,13 @@ export type Action =
   | { type: "RESET_AUTO_MANA" }
   | { type: "SET_EVENT_OWNER"; playerId: string }
   | { type: "RESET_EVENT_OWNER" }
+  // Commander actions
+  | { type: "MARK_AS_COMMANDER"; spellId: string }
+  | { type: "UNMARK_AS_COMMANDER"; spellId: string }
+  | { type: "APPLY_COMMANDER_DAMAGE"; commanderId: string; defendingPlayerId: string; amount: number }
+  | { type: "SET_COMMANDER_DAMAGE"; commanderId: string; defendingPlayerId: string; amount: number }
+  | { type: "MOVE_COMMANDER_TO_COMMAND_ZONE"; spellId: string }
+  | { type: "CAST_COMMANDER_FROM_COMMAND_ZONE"; commanderId: string; spellId?: string }
   // Battlefield actions
   | { type: "TOGGLE_TAPPED"; spellId: string }
   | { type: "DECLARE_ATTACKER"; spellId: string }
