@@ -132,6 +132,8 @@ export type CastSpell = {
   supertype?: string;
   subtype?: string;
   subtype2?: string;
+  subtypes?: string[];
+  hasAllCreatureTypes?: boolean;
   turnNumber: number;
   phase: string;
   zone: "active" | "graveyard" | "exile" | "commandZone";
@@ -175,6 +177,8 @@ export type GraveyardEntry = {
   supertype?: string;
   subtype?: string;
   subtype2?: string;
+  subtypes?: string[];
+  hasAllCreatureTypes?: boolean;
   isToken?: boolean;
   tokenCategory?: "creature" | "resource" | "status";
   isCommander?: boolean;
@@ -195,6 +199,8 @@ export type ExileEntry = {
   supertype?: string;
   subtype?: string;
   subtype2?: string;
+  subtypes?: string[];
+  hasAllCreatureTypes?: boolean;
   isToken?: boolean;
   tokenCategory?: "creature" | "resource" | "status";
   isCommander?: boolean;

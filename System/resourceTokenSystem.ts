@@ -4,7 +4,7 @@ import {
 } from "./reminderSystem";
 import type {
   GameState, Action, CastSpell, HistoryEntry, TokenGYEntry,
-  ResourceTokenKind, ManaPool,
+  ResourceTokenKind, ResourceTokenIntent, ManaPool,
 } from "../lib/types";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -45,14 +45,43 @@ function applyEvents(
 
 export function getResourceTokenCompactText(kind: ResourceTokenKind): string {
   switch (kind) {
-    case "Treasure":   return "Add mana";
-    case "Food":       return "Gain 3 life";
-    case "Clue":       return "Draw 1";
-    case "Blood":      return "Draw 1, discard 1";
-    case "Map":        return "Explore";
-    case "Powerstone": return "Add colorless";
+    case "Treasure":   return "{T}, Sac: Add 1 any color";
+    case "Food":       return "{2}, {T}, Sac: Gain 3 life";
+    case "Clue":       return "{2}, Sac: Draw 1";
+    case "Blood":      return "{1}, {T}, Discard, Sac: Draw 1";
+    case "Map":        return "{1}, {T}, Sac: Explore";
+    case "Powerstone": return "{T}: Add {C}, artifact-only";
     default:           return "Use";
   }
+}
+
+export function getResourceTokenFullText(kind: ResourceTokenKind): string {
+  switch (kind) {
+    case "Treasure":   return "{T}, Sacrifice this artifact: Add one mana of any color.";
+    case "Food":       return "{2}, {T}, Sacrifice this artifact: You gain 3 life.";
+    case "Clue":       return "{2}, Sacrifice this artifact: Draw a card.";
+    case "Blood":      return "{1}, {T}, Discard a card, Sacrifice this artifact: Draw a card.";
+    case "Map":        return "{1}, {T}, Sacrifice this artifact: Target creature you control explores.";
+    case "Powerstone": return "{T}: Add {C}. This mana can't be spent to cast a nonartifact spell.";
+    default:           return "Sacrifice this token to use its effect.";
+  }
+}
+
+export function getResourceTokenActivationCostText(kind: ResourceTokenKind): string {
+  switch (kind) {
+    case "Treasure":   return "{T}, Sacrifice this artifact";
+    case "Food":       return "{2}, {T}, Sacrifice this artifact";
+    case "Clue":       return "{2}, Sacrifice this artifact";
+    case "Blood":      return "{1}, {T}, Discard a card, Sacrifice this artifact";
+    case "Map":        return "{1}, {T}, Sacrifice this artifact";
+    case "Powerstone": return "{T}";
+    default:           return "Sacrifice";
+  }
+}
+
+export function requiresResourceTokenCostConfirmation(kind: ResourceTokenKind, intent: ResourceTokenIntent): boolean {
+  if (intent !== "use") return false;
+  return kind === "Food" || kind === "Clue" || kind === "Blood" || kind === "Map";
 }
 
 export function getResourceTokenKind(name: string): ResourceTokenKind {
@@ -164,7 +193,7 @@ export function resolveResourceToken(
     let s: GameState = { ...state, manaPool };
     s = removeToken(s);
     s = addTGY(s, "cracked");
-    s = addLog(s, `Cracked Treasure for 1 ${colorLabel} mana.`);
+    s = addLog(s, `Tapped, sacrificed: added 1 ${colorLabel} mana.`);
     s = fireEvents(s, ["Mana is added", "Mana ability is activated", "Token is sacrificed"]);
     return s;
   }
@@ -176,7 +205,7 @@ export function resolveResourceToken(
     s = updateLife(s, pid, 3);
     s = removeToken(s);
     s = addTGY(s, "sacrificed");
-    s = addLog(s, "Food used: gained 3 life.");
+    s = addLog(s, "Paid {2}, tapped, sacrificed: gained 3 life.");
     s = fireEvents(s, [
       "Life total changes",
       isUserPlayer ? "You gain life" : "Opponent gains life",
@@ -189,7 +218,7 @@ export function resolveResourceToken(
     let s: GameState = { ...state, cardsDrawn: state.cardsDrawn + 1 };
     s = removeToken(s);
     s = addTGY(s, "sacrificed");
-    s = addLog(s, "Clue used: drew 1 card.");
+    s = addLog(s, "Paid {2}, sacrificed: drew 1 card.");
     s = fireEvents(s, ["Card is drawn", "Token is sacrificed"]);
     return s;
   }
@@ -198,16 +227,16 @@ export function resolveResourceToken(
     let s: GameState = { ...state, cardsDrawn: state.cardsDrawn + 1 };
     s = removeToken(s);
     s = addTGY(s, "sacrificed");
-    s = addLog(s, "Blood used: drew 1 card, discard 1.");
+    s = addLog(s, "Paid {1}, tapped, discarded, sacrificed: drew 1 card.");
     s = fireEvents(s, ["Card is drawn", "Card is discarded", "Token is sacrificed"]);
     return s;
   }
 
   if (kind === "Map") {
     const mapResult = action.mapResult ?? "unknown";
-    let logMsg = "Map used: target creature explores.";
-    if (mapResult === "land") logMsg = "Map used: explored and revealed a land.";
-    if (mapResult === "nonland") logMsg = "Map used: explored and revealed a nonland card.";
+    let logMsg = "Paid {1}, tapped, sacrificed: explored.";
+    if (mapResult === "land") logMsg = "Paid {1}, tapped, sacrificed: explored (land revealed).";
+    if (mapResult === "nonland") logMsg = "Paid {1}, tapped, sacrificed: explored (nonland revealed).";
 
     let s = state;
     const extraEvents: string[] = [];
@@ -226,7 +255,7 @@ export function resolveResourceToken(
           ),
         };
         extraEvents.push("Counter is added to a creature", "+1/+1 counter is added");
-        logMsg = `Map used: explored and revealed a nonland. ${target.name} gets +1/+1.`;
+        logMsg = `Paid {1}, tapped, sacrificed: explored (nonland revealed). ${target.name} gets +1/+1.`;
       }
     }
 
@@ -245,7 +274,7 @@ export function resolveResourceToken(
       colorless: { ...state.manaPool.colorless, manual: state.manaPool.colorless.manual + 1 },
     };
     let s: GameState = { ...state, spellLog, manaPool };
-    s = addLog(s, "Tapped Powerstone for 1 colorless mana. Powerstone mana cannot be spent to cast nonartifact spells.");
+    s = addLog(s, "Tapped: added 1 colorless mana. Cannot cast nonartifact spells.");
     s = fireEvents(s, ["Mana is added", "Mana ability is activated"]);
     return s;
   }

@@ -116,6 +116,8 @@ export type ReminderContext = {
   spellType?: string;
   spellSupertype?: string;
   spellSubtype?: string;
+  spellSubtypes?: string[];
+  hasAllCreatureTypes?: boolean;
   spellAbilities?: string[];
   spellPower?: number;
   spellToughness?: number;
@@ -378,6 +380,8 @@ function evaluateSingleCondition(condition: ReminderCondition, context: Reminder
   switch (condition.type) {
     // ── Creature properties ────────────────────────────────────────────────────
     case "creature-type-is":
+      if (context.hasAllCreatureTypes) return true;
+      if (context.spellSubtypes && context.spellSubtypes.includes(condition.value ?? "")) return true;
       return context.spellSubtype === condition.value;
     case "has-supertype-legendary":
       return context.spellSupertype === "Legendary";

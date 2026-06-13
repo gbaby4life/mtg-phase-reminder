@@ -17,9 +17,10 @@ import {
 } from "../../System/reminderSystem";
 import { searchCardNames, CardNameRecord } from "../../System/cardSearchSystem";
 import { C, MANA_COLOR_ICONS, emptyManaCost, formatManaCostLabel, getManaCostValue, hasManaCost } from "../../lib/types";
-import type { HistoryEntry, CastSpell, GraveyardEntry, ExileEntry, TokenGYEntry, ManaPool, Player, GameState, Action, CreatureCounterType, ManaCost, CommanderRecord } from "../../lib/types";
+import type { HistoryEntry, CastSpell, GraveyardEntry, ExileEntry, TokenGYEntry, ManaPool, Player, GameState, Action, CreatureCounterType, ManaCost, CommanderRecord, ResourceTokenKind } from "../../lib/types";
 import BattlefieldModal from "../../components/BattlefieldModal";
-import { resolveResourceToken, getResourceTokenKind, getResourceTokenCompactText } from "../../System/resourceTokenSystem";
+import { resolveResourceToken, getResourceTokenKind, getResourceTokenCompactText, getResourceTokenFullText, getResourceTokenActivationCostText } from "../../System/resourceTokenSystem";
+import ResourceTokenCostConfirmModal from "../../components/modals/ResourceTokenCostConfirmModal";
 
 const PHASES = [
   "Untap", "Upkeep", "Draw", "Main Phase 1",
@@ -234,6 +235,24 @@ function reminderHasLifeEffect(r: Reminder): boolean {
   return r.effects.some(e => e.timing === "immediate" && (e.effectType === "gain-life" || e.effectType === "lose-life" || e.effectType === "pay-life"));
 }
 
+function getSpellCreatureTypes(spell: Pick<CastSpell, "subtypes" | "subtype" | "subtype2">): string[] {
+  if (spell.subtypes && spell.subtypes.length > 0) return spell.subtypes;
+  return [spell.subtype, spell.subtype2].filter(Boolean) as string[];
+}
+
+function getSpellTypeLine(spell: Pick<CastSpell, "type" | "supertype" | "subtype" | "subtype2" | "subtypes" | "hasAllCreatureTypes" | "isToken" | "tokenCategory">): string {
+  const supertypePart = spell.supertype ? `${spell.supertype} ` : "";
+  const isCreatureLike = spell.type === "Creature" || (spell.isToken && spell.tokenCategory === "creature");
+  if (!isCreatureLike) {
+    const sub = spell.subtype ? ` — ${spell.subtype}${spell.subtype2 ? `/${spell.subtype2}` : ""}` : "";
+    return `${supertypePart}${spell.type}${sub}`;
+  }
+  const types = getSpellCreatureTypes(spell);
+  const typePart = types.length > 0 ? ` — ${types.join(" ")}` : "";
+  const changelingPart = spell.hasAllCreatureTypes ? " · Changeling" : "";
+  return `${supertypePart}${spell.type}${typePart}${changelingPart}`;
+}
+
 function reducer(state: GameState, action: Action): GameState {
   switch (action.type) {
     case "GO_SETUP": return { ...state, screen: "setup" };
@@ -411,10 +430,10 @@ function reducer(state: GameState, action: Action): GameState {
       const ptPart = spell.power !== undefined && spell.toughness !== undefined
         ? ` ${spell.power}/${spell.toughness}` : "";
       const superPart = spell.supertype ? `${spell.supertype} ` : "";
-      const subPart = spell.subtype ? ` — ${spell.subtype}` : "";
+      const typeLine = getSpellTypeLine(spell);
       const entry = logEntry(state, isToken
         ? `◈ Token created: ${spell.name}`
-        : `✦ Cast ${superPart}${spell.type}${subPart}: ${spell.name}${ptPart}`
+        : `✦ Cast ${typeLine}: ${spell.name}${ptPart}`
       );
       const isCreatureToken = isToken && spell.tokenCategory === "creature";
       const isResourceToken = isToken && spell.tokenCategory === "resource";
@@ -445,7 +464,10 @@ function reducer(state: GameState, action: Action): GameState {
       const currentPhase = PHASES[state.phaseIndex];
       const castCtx: ReminderContext = {
         spellType: spell.type, spellSupertype: spell.supertype,
-        spellSubtype: spell.subtype, spellAbilities: spell.abilities,
+        spellSubtype: spell.subtype,
+        spellSubtypes: getSpellCreatureTypes(spell),
+        hasAllCreatureTypes: spell.hasAllCreatureTypes,
+        spellAbilities: spell.abilities,
         spellPower: spell.power, spellToughness: spell.toughness,
         spellManaValue: spell.manaValue, isToken,
         isMyTurn: state.isMyTurn, currentPhase,
@@ -1172,7 +1194,7 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
   const commandersComplete = missingCommanderNames.length === 0;
   const canStartGame = gameType !== "commander" || commandersComplete;
   const setupKeyboardPadding = keyboardOpen
-    ? Platform.OS === "android" ? 96 : 120
+    ? Platform.OS === "android" ? 320 : 200
     : undefined;
 
   useEffect(() => {
@@ -1315,7 +1337,7 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
       <StatusBar barStyle="light-content" backgroundColor={C.bg} />
       <KeyboardAvoidingView
         style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={Platform.OS === "ios" ? 24 : 0}
       >
       <ScrollView
@@ -1478,6 +1500,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [spellLogModal, setSpellLogModal] = useState(false);
   const [spellModal, setSpellModal] = useState(false);
   const [spellNameSuggestions, setSpellNameSuggestions] = useState<CardNameRecord[]>([]);
+  const [editNameSuggestions, setEditNameSuggestions] = useState<CardNameRecord[]>([]);
   const [drawModal, setDrawModal] = useState(false);
   const [creatureModal, setCreatureModal] = useState(false);
   const [landModal, setLandModal] = useState(false);
@@ -1512,6 +1535,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [mapSpellId, setMapSpellId] = useState<string | null>(null);
   const [mapResult, setMapResult] = useState<"land" | "nonland" | "unknown" | null>(null);
   const [mapTargetId, setMapTargetId] = useState<string | null>(null);
+  const [tokenCostConfirmVisible, setTokenCostConfirmVisible] = useState(false);
+  const [pendingTokenConfirm, setPendingTokenConfirm] = useState<{ spellId: string; kind: ResourceTokenKind; followUp: "dispatch" | "map" } | null>(null);
   const [gyModal, setGyModal] = useState(false);
   const [gyTab, setGyTab] = useState<"graveyard" | "exile">("graveyard");
   const [gyPlayerFilter, setGyPlayerFilter] = useState<string>("all");
@@ -1538,6 +1563,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [spellSupertype, setSpellSupertype] = useState<string | null>(null);
   const [spellSubtype, setSpellSubtype] = useState<string | null>(null);
   const [spellSubtype2, setSpellSubtype2] = useState<string | null>(null);
+  const [creatureSubtypes, setCreatureSubtypes] = useState<string[]>([]);
+  const [spellHasAllCreatureTypes, setSpellHasAllCreatureTypes] = useState(false);
   const [spellPower, setSpellPower] = useState<string>("");
   const [spellToughness, setSpellToughness] = useState<string>("");
   const [spellManaCost, setSpellManaCost] = useState<ManaCost>(() => emptyManaCost());
@@ -1753,6 +1780,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
     setSpellSupertype(spell.supertype ?? null);
     setSpellSubtype(spell.subtype ?? null);
     setSpellSubtype2(spell.subtype2 ?? null);
+    setCreatureSubtypes(getSpellCreatureTypes(spell));
+    setSpellHasAllCreatureTypes(spell.hasAllCreatureTypes ?? false);
     setSpellPower(spell.power?.toString() ?? "");
     setSpellToughness(spell.toughness?.toString() ?? "");
     setSpellManaCost(manaCostFromSpell(spell));
@@ -1769,6 +1798,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
 
   function closeEditSpellModal(reopenBattlefield = true) {
     setEditSpellModal(false);
+    setEditNameSuggestions([]);
     if (reopenBattlefield && returnToBattlefieldAfterEdit) {
       setReturnToBattlefieldAfterEdit(false);
       setBattlefieldModal(true);
@@ -1806,6 +1836,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
     setSpellSupertype(null);
     setSpellSubtype(null);
     setSpellSubtype2(null);
+    setCreatureSubtypes([]);
+    setSpellHasAllCreatureTypes(false);
     setSpellPower("");
     setSpellToughness("");
     setSpellManaCost(emptyManaCost());
@@ -2981,7 +3013,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                           <Text style={{ fontSize: 18 }}>{typeIcons[sp.type] ?? "★"}</Text>
                           <View style={{ flex: 1 }}>
                             <Text style={s.reminderTitle}>{sp.name}</Text>
-                            <Text style={s.reminderDesc}>{[sp.supertype, sp.type, (sp.subtype || sp.subtype2) ? `— ${[sp.subtype, sp.subtype2].filter(Boolean).join("/")}` : null, (sp.power !== undefined && sp.toughness !== undefined) ? `${sp.power}/${sp.toughness}` : null, getSpellCostMeta(sp), sp.currentLoyalty !== undefined ? `👁 ${sp.currentLoyalty}` : null, `· T${sp.turnNumber}`, sp.playerId ? `· ${state.players.find(p => p.id === sp.playerId)?.name ?? sp.playerId}` : null].filter(Boolean).join(" ")}</Text>
+                            <Text style={s.reminderDesc}>{[sp.supertype, sp.type, (() => { const t = getSpellCreatureTypes(sp); return t.length > 0 ? `— ${t.join(" ")}` : ((sp.subtype || sp.subtype2) ? `— ${[sp.subtype, sp.subtype2].filter(Boolean).join("/")}` : null); })(), sp.hasAllCreatureTypes ? "· Changeling" : null, (sp.power !== undefined && sp.toughness !== undefined) ? `${sp.power}/${sp.toughness}` : null, getSpellCostMeta(sp), sp.currentLoyalty !== undefined ? `👁 ${sp.currentLoyalty}` : null, `· T${sp.turnNumber}`, sp.playerId ? `· ${state.players.find(p => p.id === sp.playerId)?.name ?? sp.playerId}` : null].filter(Boolean).join(" ")}</Text>
                           </View>
                         </TouchableOpacity>
                       );
@@ -3093,12 +3125,20 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             {/* Token — resource */}
             {activeSpell?.type === "Token" && activeSpell?.tokenCategory === "resource" && (() => {
               const spell = activeSpell!;
-              const baseName = spell.name.replace(/^\d+x\s*/, "").toLowerCase();
-              const use = (extra?: object) => {
-                dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: spell.id, intent: "use", ...extra });
+              const kind = getResourceTokenKind(spell.name);
+              const fullText = getResourceTokenFullText(kind);
+              const costText = getResourceTokenActivationCostText(kind);
+              const colonIdx = fullText.indexOf(": ");
+              const effectText = colonIdx >= 0 ? fullText.slice(colonIdx + 2) : fullText;
+              const owner = state.players.find(p => p.id === spell.playerId);
+
+              const openConfirm = (followUp: "dispatch" | "map") => {
+                setPendingTokenConfirm({ spellId: spell.id, kind, followUp });
+                setTokenCostConfirmVisible(true);
                 setSpellActionModal(false);
               };
               const sac = () => { dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: spell.id, intent: "sacrifice" }); setSpellActionModal(false); };
+              const destroy = () => { dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: spell.id, intent: "destroy" }); setSpellActionModal(false); };
               const del = () => { dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: spell.id, intent: "delete" }); setSpellActionModal(false); };
               const cancelBtn = (
                 <TouchableOpacity style={[s.actionBtn, s.closeBtnStyle]} onPress={() => setSpellActionModal(false)}>
@@ -3106,106 +3146,120 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 </TouchableOpacity>
               );
 
-              if (baseName.includes("treasure")) return (<>
+              const extraHeader = (<>
+                {owner && <Text style={[s.reminderDesc, { textAlign: "center" }]}>{owner.name}</Text>}
+                <Text style={[s.reminderDesc, { textAlign: "center" }]}>Resource Token{spell.tapped ? " · Tapped" : " · Untapped"}</Text>
+                <Text style={[s.reminderDesc, { textAlign: "center", fontStyle: "italic", marginBottom: 8 }]}>{fullText}</Text>
+              </>);
+
+              const commonBtns = (<>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
+                  <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={destroy}>
+                  <Text style={s.confirmBtnText}>💥 Destroy</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
+                  <Text style={s.confirmBtnText}>✕ Delete</Text>
+                </TouchableOpacity>
+                {cancelBtn}
+              </>);
+
+              if (kind === "Treasure") return (<>
+                {extraHeader}
                 <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]}
                   onPress={() => { setSpellActionModal(false); setTreasureColorModal(true); }}>
-                  <Text style={s.confirmBtnText}>◈ Crack</Text>
+                  <Text style={s.confirmBtnText}>◈ Crack Treasure</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
-                  <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
-                  <Text style={s.confirmBtnText}>✕ Delete</Text>
-                </TouchableOpacity>
-                {cancelBtn}
+                {commonBtns}
               </>);
 
-              if (baseName.includes("food")) return (<>
+              if (kind === "Food") return (<>
+                {extraHeader}
                 <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]}
-                  onPress={() => use()}>
+                  onPress={() => openConfirm("dispatch")}>
                   <Text style={s.confirmBtnText}>Use — Gain 3 Life</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
-                  <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
-                  <Text style={s.confirmBtnText}>✕ Delete</Text>
-                </TouchableOpacity>
-                {cancelBtn}
+                {commonBtns}
               </>);
 
-              if (baseName.includes("clue")) return (<>
+              if (kind === "Clue") return (<>
+                {extraHeader}
                 <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]}
-                  onPress={() => use()}>
+                  onPress={() => openConfirm("dispatch")}>
                   <Text style={s.confirmBtnText}>Use — Draw 1 Card</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
-                  <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
-                  <Text style={s.confirmBtnText}>✕ Delete</Text>
-                </TouchableOpacity>
-                {cancelBtn}
+                {commonBtns}
               </>);
 
-              if (baseName.includes("blood")) return (<>
+              if (kind === "Blood") return (<>
+                {extraHeader}
                 <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]}
-                  onPress={() => use()}>
+                  onPress={() => openConfirm("dispatch")}>
                   <Text style={s.confirmBtnText}>Use — Draw 1, Discard 1</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
-                  <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
-                  <Text style={s.confirmBtnText}>✕ Delete</Text>
-                </TouchableOpacity>
-                {cancelBtn}
+                {commonBtns}
               </>);
 
-              if (baseName.includes("map")) return (<>
+              if (kind === "Map") return (<>
+                {extraHeader}
                 <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]}
-                  onPress={() => { setMapSpellId(spell.id); setSpellActionModal(false); setMapModal(true); }}>
+                  onPress={() => openConfirm("map")}>
                   <Text style={s.confirmBtnText}>Use — Explore</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
-                  <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
-                  <Text style={s.confirmBtnText}>✕ Delete</Text>
-                </TouchableOpacity>
-                {cancelBtn}
+                {commonBtns}
               </>);
 
-              if (baseName.includes("powerstone")) return (<>
+              if (kind === "Powerstone") return (<>
+                {extraHeader}
                 <TouchableOpacity
                   style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 4 }, spell.tapped && { opacity: 0.4 }]}
                   disabled={!!spell.tapped}
-                  onPress={() => use()}>
+                  onPress={() => { dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: spell.id, intent: "use" }); setSpellActionModal(false); }}>
                   <Text style={s.confirmBtnText}>Tap for 1 Colorless Mana</Text>
                 </TouchableOpacity>
                 <Text style={{ color: C.muted, fontSize: 11, textAlign: "center", marginBottom: 8 }}>Powerstone mana cannot cast nonartifact spells</Text>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
-                  <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
-                  <Text style={s.confirmBtnText}>✕ Delete</Text>
-                </TouchableOpacity>
-                {cancelBtn}
+                {commonBtns}
               </>);
 
               return (<>
+                {extraHeader}
                 <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]}
-                  onPress={() => use()}>
+                  onPress={() => { dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: spell.id, intent: "use" }); setSpellActionModal(false); }}>
                   <Text style={s.confirmBtnText}>Use</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
-                  <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
-                  <Text style={s.confirmBtnText}>✕ Delete</Text>
-                </TouchableOpacity>
-                {cancelBtn}
+                {commonBtns}
               </>);
+            })()}
+
+            {/* Token — resource cost confirmation (opened when Use tapped for Food/Clue/Blood/Map) */}
+            {tokenCostConfirmVisible && pendingTokenConfirm && (() => {
+              const { spellId, kind, followUp } = pendingTokenConfirm;
+              const fullText = getResourceTokenFullText(kind);
+              const costText = getResourceTokenActivationCostText(kind);
+              const colonIdx = fullText.indexOf(": ");
+              const effectText = colonIdx >= 0 ? fullText.slice(colonIdx + 2) : fullText;
+              const confirmSpell = state.spellLog.find(x => x.id === spellId);
+              return (
+                <ResourceTokenCostConfirmModal
+                  visible={tokenCostConfirmVisible}
+                  tokenName={confirmSpell?.name ?? kind}
+                  rulesText={fullText}
+                  costText={costText}
+                  effectText={effectText}
+                  onCancel={() => { setTokenCostConfirmVisible(false); setPendingTokenConfirm(null); }}
+                  onConfirm={() => {
+                    if (followUp === "dispatch") {
+                      dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId, intent: "use" });
+                    } else {
+                      setMapSpellId(spellId);
+                      setMapModal(true);
+                    }
+                    setTokenCostConfirmVisible(false);
+                    setPendingTokenConfirm(null);
+                  }}
+                />
+              );
             })()}
 
             {/* Token — creature */}
@@ -3462,14 +3516,47 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
 
       {/* EDIT SPELL MODAL */}
       <Modal visible={editSpellModal} transparent animationType="slide" onRequestClose={() => closeEditSpellModal()}>
-        <KeyboardAvoidingView style={{ flex: 1, justifyContent: "flex-end" }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <KeyboardAvoidingView style={{ flex: 1, justifyContent: "flex-end" }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
           <TouchableOpacity style={s.backdrop} onPress={() => closeEditSpellModal()} />
           <View style={[s.sheet, { maxHeight: "92%", flex: 1 }]}>
             <View style={s.handle} />
             <Text style={s.sheetTitle}>Edit: {activeSpell?.name}</Text>
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 16 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               <Text style={s.sectionLabel}>Name</Text>
-              <TextInput style={[s.input, { marginBottom: 16 }]} value={editSpellName} onChangeText={setEditSpellName} placeholder="Card name" placeholderTextColor={C.dim} />
+              <TextInput
+                style={[s.input, { marginBottom: (editSpellName.trim().length >= 2 && (editNameSuggestions.length > 0 || editSpellName.trim() !== (activeSpell?.name ?? "").trim())) ? 6 : 16 }]}
+                value={editSpellName}
+                onChangeText={(text) => { setEditSpellName(text); setEditNameSuggestions(searchCardNames(text)); }}
+                placeholder="Search card name..."
+                placeholderTextColor={C.dim}
+              />
+              {editSpellName.trim().length >= 2 && (editNameSuggestions.length > 0 || editSpellName.trim() !== (activeSpell?.name ?? "").trim()) && (
+                <View style={{ marginBottom: 16, borderRadius: 12, borderWidth: 1, borderColor: C.border, overflow: "hidden" }}>
+                  {editNameSuggestions.length > 0 ? (
+                    <ScrollView
+                      style={{ maxHeight: 220 }}
+                      nestedScrollEnabled
+                      keyboardShouldPersistTaps="handled"
+                      showsVerticalScrollIndicator={false}>
+                      {editNameSuggestions.map((card, idx) => (
+                        <TouchableOpacity
+                          key={card.name}
+                          style={[{ paddingHorizontal: 16, paddingVertical: 13, backgroundColor: C.cardAlt, flexDirection: "row", alignItems: "center", gap: 10 },
+                            idx < editNameSuggestions.length - 1 && { borderBottomWidth: 1, borderBottomColor: C.border }]}
+                          onPress={() => { setEditSpellName(card.name); setEditNameSuggestions([]); }}
+                          activeOpacity={0.65}>
+                          <Text style={{ color: C.dim, fontSize: 12 }}>⚔</Text>
+                          <Text style={{ color: C.text, fontSize: 14, fontWeight: "700", flex: 1 }}>{card.name}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  ) : (
+                    <View style={{ paddingHorizontal: 16, paddingVertical: 14, backgroundColor: C.cardAlt }}>
+                      <Text style={{ color: C.dim, fontSize: 13, fontStyle: "italic" }}>No cards matching "{editSpellName.trim()}"</Text>
+                    </View>
+                  )}
+                </View>
+              )}
               <Text style={s.sectionLabel}>Card Type</Text>
               {activeSpell?.type === "Token" ? (
                 <View style={{ backgroundColor: C.cardAlt, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 12, marginBottom: 16, borderWidth: 1, borderColor: C.border }}>
@@ -3494,22 +3581,81 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 ))}
               </View>
               {(() => {
-                const isCreatureToken = editSpellType === "Token" && activeSpell?.tokenCategory === "creature";
-                const subtypeList = isCreatureToken ? MTG_CREATURE_SUBTYPES : (MTG_SUBTYPES_BY_TYPE[editSpellType ?? ""] ?? []);
-                const subtypeLabel = isCreatureToken ? "Creature" : editSpellType;
+                const isCreatureLike = editSpellType === "Creature" || (editSpellType === "Token" && activeSpell?.tokenCategory === "creature");
+                if (isCreatureLike) {
+                  return (<>
+                    <Text style={s.sectionLabel}>Creature Types (optional)</Text>
+                    {creatureSubtypes.length > 0 && (
+                      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                        {creatureSubtypes.map(ct => (
+                          <TouchableOpacity key={ct}
+                            style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 14, borderWidth: 1.5, backgroundColor: C.accentDim, borderColor: C.accent }}
+                            onPress={() => setCreatureSubtypes(prev => prev.filter(x => x !== ct))}>
+                            <Text style={{ color: C.accent, fontSize: 12, fontWeight: "700" }}>✓ {ct} ×</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
+                    <TouchableOpacity
+                      style={[{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16, borderWidth: 1.5, marginBottom: 10 }, spellHasAllCreatureTypes ? { backgroundColor: C.accentDim, borderColor: C.accent } : { backgroundColor: C.cardAlt, borderColor: C.border }]}
+                      onPress={() => setSpellHasAllCreatureTypes(v => !v)}>
+                      <Text style={{ fontSize: 14 }}>🌈</Text>
+                      <Text style={{ color: spellHasAllCreatureTypes ? C.accent : C.muted, fontSize: 12, fontWeight: "700" }}>Changeling / Every Creature Type</Text>
+                    </TouchableOpacity>
+                    <TextInput style={[s.input, { marginBottom: 8 }]} value={subtypeSearch} onChangeText={setSubtypeSearch} placeholder="Search creature types..." placeholderTextColor={C.dim} />
+                    {(() => {
+                      const filteredTypes = (MTG_CREATURE_SUBTYPES as readonly string[]).filter(
+                        st => !subtypeSearch || st.toLowerCase().includes(subtypeSearch.toLowerCase())
+                      );
+                      if (filteredTypes.length === 0 && subtypeSearch.trim()) {
+                        return (
+                          <View style={{ paddingVertical: 12, paddingHorizontal: 4, marginBottom: 4 }}>
+                            <Text style={{ color: C.dim, fontSize: 13, fontStyle: "italic" }}>No types matching "{subtypeSearch.trim()}"</Text>
+                          </View>
+                        );
+                      }
+                      return (
+                        <ScrollView style={{ maxHeight: 200, marginBottom: 4 }} nestedScrollEnabled keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+                          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingBottom: 4 }}>
+                            {filteredTypes.map(st => {
+                              const selected = creatureSubtypes.includes(st);
+                              return (
+                                <TouchableOpacity key={st}
+                                  style={[{ paddingHorizontal: 11, paddingVertical: 6, borderRadius: 16, borderWidth: 1.5, flexDirection: "row", alignItems: "center", gap: 3 },
+                                    selected ? { backgroundColor: C.accentDim, borderColor: C.accent } : { backgroundColor: C.cardAlt, borderColor: C.border }]}
+                                  onPress={() => setCreatureSubtypes(prev => selected ? prev.filter(x => x !== st) : [...prev, st])}>
+                                  {selected && <Text style={{ color: C.accent, fontSize: 11, fontWeight: "900" }}>✓</Text>}
+                                  <Text style={{ color: selected ? C.accent : C.muted, fontSize: 12, fontWeight: "600" }}>{st}</Text>
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </View>
+                        </ScrollView>
+                      );
+                    })()}
+                  </>);
+                }
+                const subtypeList = MTG_SUBTYPES_BY_TYPE[editSpellType ?? ""] ?? [];
                 if (!subtypeList.length) return null;
+                const filteredSubs = (subtypeList as readonly string[]).filter(st => !subtypeSearch || st.toLowerCase().includes(subtypeSearch.toLowerCase()));
                 return (<>
                   <Text style={s.sectionLabel}>Subtype</Text>
-                  <TextInput style={[s.input, { marginBottom: 8 }]} value={subtypeSearch} onChangeText={setSubtypeSearch} placeholder={`Search ${subtypeLabel} subtypes...`} placeholderTextColor={C.dim} />
-                  <ScrollView style={{ maxHeight: 140, marginBottom: 12 }} nestedScrollEnabled showsVerticalScrollIndicator={false}>
-                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-                      {(subtypeList as readonly string[]).filter(st => !subtypeSearch || st.toLowerCase().includes(subtypeSearch.toLowerCase())).map(st => (
-                        <TouchableOpacity key={st} style={[{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1.5 }, spellSubtype === st ? { backgroundColor: C.accentDim, borderColor: C.accent } : { backgroundColor: C.cardAlt, borderColor: C.border }]} onPress={() => setSpellSubtype(spellSubtype === st ? null : st)}>
-                          <Text style={{ color: spellSubtype === st ? C.accent : C.muted, fontSize: 12, fontWeight: "600" }}>{st}</Text>
-                        </TouchableOpacity>
-                      ))}
+                  <TextInput style={[s.input, { marginBottom: 8 }]} value={subtypeSearch} onChangeText={setSubtypeSearch} placeholder={`Search ${editSpellType} subtypes...`} placeholderTextColor={C.dim} />
+                  {filteredSubs.length === 0 && subtypeSearch.trim() ? (
+                    <View style={{ paddingVertical: 12, paddingHorizontal: 4, marginBottom: 12 }}>
+                      <Text style={{ color: C.dim, fontSize: 13, fontStyle: "italic" }}>No {editSpellType} subtypes matching "{subtypeSearch.trim()}"</Text>
                     </View>
-                  </ScrollView>
+                  ) : (
+                    <ScrollView style={{ maxHeight: 200, marginBottom: 12 }} nestedScrollEnabled keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+                      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingBottom: 4 }}>
+                        {filteredSubs.map(st => (
+                          <TouchableOpacity key={st} style={[{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1.5 }, spellSubtype === st ? { backgroundColor: C.accentDim, borderColor: C.accent } : { backgroundColor: C.cardAlt, borderColor: C.border }]} onPress={() => setSpellSubtype(spellSubtype === st ? null : st)}>
+                            <Text style={{ color: spellSubtype === st ? C.accent : C.muted, fontSize: 12, fontWeight: "600" }}>{st}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </ScrollView>
+                  )}
                 </>);
               })()}
               {(editSpellType === "Creature" || (editSpellType === "Token" && activeSpell?.tokenCategory === "creature")) && (<>
@@ -3574,7 +3720,10 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                         name: editSpellName.trim(),
                         type: editSpellType,
                         supertype: spellSupertype ?? undefined,
-                        subtype: spellSubtype ?? undefined,
+                        subtype: isCreatureLikeEdit ? (creatureSubtypes[0] ?? undefined) : (spellSubtype ?? undefined),
+                        subtype2: isCreatureLikeEdit ? (creatureSubtypes[1] ?? undefined) : undefined,
+                        subtypes: isCreatureLikeEdit ? (creatureSubtypes.length > 0 ? creatureSubtypes : undefined) : undefined,
+                        hasAllCreatureTypes: isCreatureLikeEdit ? (spellHasAllCreatureTypes || undefined) : undefined,
                         power: spellPower !== "" ? parseInt(spellPower, 10) : undefined,
                         toughness: spellToughness !== "" ? parseInt(spellToughness, 10) : undefined,
                         ...manaFields,
@@ -3602,62 +3751,60 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
 
       {/* SPELL CAST MODAL — STEP 1: Type Selection */}
       <Modal visible={spellModal} transparent animationType="slide" onRequestClose={() => setSpellModal(false)}>
-        <KeyboardAvoidingView style={{ flex: 1, justifyContent: "flex-end" }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <KeyboardAvoidingView style={{ flex: 1, justifyContent: "flex-end" }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
           <TouchableOpacity style={s.backdrop} onPress={() => setSpellModal(false)} />
-          <View style={s.sheet}>
+          <View style={[s.sheet, { maxHeight: "92%", flex: 1 }]}>
             <View style={s.handle} />
             <Text style={s.sheetTitle}>Spell Cast</Text>
-            <Text style={s.sectionLabel}>Spell Name (optional)</Text>
-            <TextInput
-              style={s.input}
-              value={spellName}
-              onChangeText={(text) => {
-                setSpellName(text);
-                setSpellNameSuggestions(searchCardNames(text));
-              }}
-              placeholder="Search card name..."
-              placeholderTextColor={C.dim}
-            />
-            {spellNameSuggestions.length > 0 && (
-              <View style={{
-                backgroundColor: C.cardAlt,
-                borderRadius: 10,
-                borderWidth: 1,
-                borderColor: C.border,
-                marginBottom: 12,
-                overflow: "hidden"
-              }}>
-                {spellNameSuggestions.map((card) => (
-                  <TouchableOpacity
-                    key={card.name}
-                    style={{
-                      paddingHorizontal: 14,
-                      paddingVertical: 10,
-                      borderBottomWidth: 1,
-                      borderBottomColor: C.border
-                    }}
-                    onPress={() => {
-                      setSpellName(card.name);
-                      setSpellNameSuggestions([]);
-                    }}
-                    activeOpacity={0.75}
-                  >
-                    <Text style={{ color: C.text, fontSize: 13, fontWeight: "600" }}>
-                      {card.name}
-                    </Text>
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 8 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+              <Text style={s.sectionLabel}>Spell Name (optional)</Text>
+              <TextInput
+                style={[s.input, { marginBottom: spellName.trim().length >= 2 ? 6 : 16 }]}
+                value={spellName}
+                onChangeText={(text) => {
+                  setSpellName(text);
+                  setSpellNameSuggestions(searchCardNames(text));
+                }}
+                placeholder="Search card name..."
+                placeholderTextColor={C.dim}
+              />
+              {spellName.trim().length >= 2 && (
+                <View style={{ marginBottom: 16, borderRadius: 12, borderWidth: 1, borderColor: C.border, overflow: "hidden" }}>
+                  {spellNameSuggestions.length > 0 ? (
+                    <ScrollView
+                      style={{ maxHeight: 220 }}
+                      nestedScrollEnabled
+                      keyboardShouldPersistTaps="handled"
+                      showsVerticalScrollIndicator={false}>
+                      {spellNameSuggestions.map((card, idx) => (
+                        <TouchableOpacity
+                          key={card.name}
+                          style={[{ paddingHorizontal: 16, paddingVertical: 13, backgroundColor: C.cardAlt, flexDirection: "row", alignItems: "center", gap: 10 },
+                            idx < spellNameSuggestions.length - 1 && { borderBottomWidth: 1, borderBottomColor: C.border }]}
+                          onPress={() => { setSpellName(card.name); setSpellNameSuggestions([]); }}
+                          activeOpacity={0.65}>
+                          <Text style={{ color: C.dim, fontSize: 12 }}>⚔</Text>
+                          <Text style={{ color: C.text, fontSize: 14, fontWeight: "700", flex: 1 }}>{card.name}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  ) : (
+                    <View style={{ paddingHorizontal: 16, paddingVertical: 14, backgroundColor: C.cardAlt }}>
+                      <Text style={{ color: C.dim, fontSize: 13, fontStyle: "italic" }}>No cards matching "{spellName.trim()}"</Text>
+                    </View>
+                  )}
+                </View>
+              )}
+              <Text style={s.sectionLabel}>Card Type</Text>
+              <View style={s.spellGrid}>
+                {SPELL_TYPES.map(t => (
+                  <TouchableOpacity key={t.key} style={[s.spellTypeBtn, selectedSpell === t.key && s.spellTypeBtnActive]} onPress={() => setSelectedSpell(t.key)} activeOpacity={0.8}>
+                    <Text style={s.spellTypeIcon}>{t.icon}</Text>
+                    <Text style={[s.spellTypeLabel, selectedSpell === t.key && { color: C.text }]}>{t.key}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
-            )}
-            <Text style={s.sectionLabel}>Card Type</Text>
-            <View style={s.spellGrid}>
-              {SPELL_TYPES.map(t => (
-                <TouchableOpacity key={t.key} style={[s.spellTypeBtn, selectedSpell === t.key && s.spellTypeBtnActive]} onPress={() => setSelectedSpell(t.key)} activeOpacity={0.8}>
-                  <Text style={s.spellTypeIcon}>{t.icon}</Text>
-                  <Text style={[s.spellTypeLabel, selectedSpell === t.key && { color: C.text }]}>{t.key}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+            </ScrollView>
             <View style={s.modalBtnRow}>
               <TouchableOpacity style={s.modalCancelBtn} onPress={() => { setSpellModal(false); setSpellNameSuggestions([]); }}><Text style={s.closeBtnText}>Cancel</Text></TouchableOpacity>
               <TouchableOpacity style={[s.modalConfirmBtn, !selectedSpell && { opacity: 0.4 }]} disabled={!selectedSpell}
@@ -3677,7 +3824,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
 
       {/* SPELL DETAIL MODAL — STEP 2: Type-specific fields */}
       <Modal visible={spellDetailModal} transparent animationType="slide" onRequestClose={() => setSpellDetailModal(false)}>
-        <KeyboardAvoidingView style={{ flex: 1, justifyContent: "flex-end" }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <KeyboardAvoidingView style={{ flex: 1, justifyContent: "flex-end" }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
           <TouchableOpacity style={s.backdrop} onPress={() => setSpellDetailModal(false)} />
           <View style={[s.sheet, { maxHeight: "92%", flex: 1 }]}>
             <View style={s.handle} />
@@ -3694,37 +3841,98 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 ))}
               </View>
 
-              {/* SUBTYPE — searchable */}
-              {MTG_SUBTYPES_BY_TYPE[selectedSpell ?? ""] && MTG_SUBTYPES_BY_TYPE[selectedSpell ?? ""].length > 0 && (<>
+              {/* SUBTYPE / CREATURE TYPES — searchable */}
+              {selectedSpell === "Creature" ? (<>
+                <Text style={s.sectionLabel}>Creature Types (optional)</Text>
+                {creatureSubtypes.length > 0 && (
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                    {creatureSubtypes.map(ct => (
+                      <TouchableOpacity key={ct}
+                        style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 14, borderWidth: 1.5, backgroundColor: C.accentDim, borderColor: C.accent }}
+                        onPress={() => setCreatureSubtypes(prev => prev.filter(x => x !== ct))}>
+                        <Text style={{ color: C.accent, fontSize: 12, fontWeight: "700" }}>✓ {ct} ×</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+                <TouchableOpacity
+                  style={[{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16, borderWidth: 1.5, marginBottom: 10 }, spellHasAllCreatureTypes ? { backgroundColor: C.accentDim, borderColor: C.accent } : { backgroundColor: C.cardAlt, borderColor: C.border }]}
+                  onPress={() => setSpellHasAllCreatureTypes(v => !v)}>
+                  <Text style={{ fontSize: 14 }}>🌈</Text>
+                  <Text style={{ color: spellHasAllCreatureTypes ? C.accent : C.muted, fontSize: 12, fontWeight: "700" }}>Changeling / Every Creature Type</Text>
+                </TouchableOpacity>
+                <TextInput style={[s.input, { marginBottom: 8 }]} value={subtypeSearch} onChangeText={setSubtypeSearch} placeholder="Search creature types..." placeholderTextColor={C.dim} />
+                {(() => {
+                  const filteredTypes = (MTG_CREATURE_SUBTYPES as readonly string[]).filter(
+                    st => !subtypeSearch || st.toLowerCase().includes(subtypeSearch.toLowerCase())
+                  );
+                  if (filteredTypes.length === 0 && subtypeSearch.trim()) {
+                    return (
+                      <View style={{ paddingVertical: 12, paddingHorizontal: 4, marginBottom: 4 }}>
+                        <Text style={{ color: C.dim, fontSize: 13, fontStyle: "italic" }}>No types matching "{subtypeSearch.trim()}"</Text>
+                      </View>
+                    );
+                  }
+                  return (
+                    <ScrollView style={{ maxHeight: 200, marginBottom: 4 }} nestedScrollEnabled keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+                      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingBottom: 8 }}>
+                        {filteredTypes.map(st => {
+                          const selected = creatureSubtypes.includes(st);
+                          return (
+                            <TouchableOpacity key={st}
+                              style={[{ paddingHorizontal: 11, paddingVertical: 6, borderRadius: 16, borderWidth: 1.5, flexDirection: "row", alignItems: "center", gap: 3 },
+                                selected ? { backgroundColor: C.accentDim, borderColor: C.accent } : { backgroundColor: C.cardAlt, borderColor: C.border }]}
+                              onPress={() => setCreatureSubtypes(prev => selected ? prev.filter(x => x !== st) : [...prev, st])}>
+                              {selected && <Text style={{ color: C.accent, fontSize: 11, fontWeight: "900" }}>✓</Text>}
+                              <Text style={{ color: selected ? C.accent : C.muted, fontSize: 12, fontWeight: "600" }}>{st}</Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    </ScrollView>
+                  );
+                })()}
+              </>) : (MTG_SUBTYPES_BY_TYPE[selectedSpell ?? ""] && MTG_SUBTYPES_BY_TYPE[selectedSpell ?? ""].length > 0 && (<>
                 <Text style={s.sectionLabel}>Subtype (optional)</Text>
                 <TextInput style={[s.input, { marginBottom: 8 }]} value={subtypeSearch} onChangeText={setSubtypeSearch} placeholder={`Search ${selectedSpell} subtypes...`} placeholderTextColor={C.dim} />
-                <ScrollView style={{ maxHeight: 160, marginBottom: 4 }} nestedScrollEnabled showsVerticalScrollIndicator={false}>
-                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingBottom: 8 }}>
-                    {(MTG_SUBTYPES_BY_TYPE[selectedSpell ?? ""] as readonly string[])
-                      .filter(st => !subtypeSearch || st.toLowerCase().includes(subtypeSearch.toLowerCase()))
-                      .map(st => (
-                        <TouchableOpacity key={st}
-                          style={[{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1.5 },
-                            spellSubtype === st ? { backgroundColor: C.accentDim, borderColor: C.accent }
-                            : spellSubtype2 === st ? { backgroundColor: C.accentDim, borderColor: C.accent }
-                            : { backgroundColor: C.cardAlt, borderColor: C.border }]}
-                          onPress={() => {
-                            if (spellSubtype === st) { setSpellSubtype(null); }
-                            else if (spellSubtype === null) { setSpellSubtype(st); }
-                            else { setSpellSubtype2(spellSubtype2 === st ? null : st); }
-                          }}>
-                          <Text style={{ color: (spellSubtype === st || spellSubtype2 === st) ? C.accent : C.muted, fontSize: 12, fontWeight: "600" }}>{st}</Text>
-                        </TouchableOpacity>
-                      ))}
-                  </View>
-                </ScrollView>
+                {(() => {
+                  const filteredCastSubs = (MTG_SUBTYPES_BY_TYPE[selectedSpell ?? ""] as readonly string[])
+                    .filter(st => !subtypeSearch || st.toLowerCase().includes(subtypeSearch.toLowerCase()));
+                  if (filteredCastSubs.length === 0 && subtypeSearch.trim()) {
+                    return (
+                      <View style={{ paddingVertical: 12, paddingHorizontal: 4, marginBottom: 4 }}>
+                        <Text style={{ color: C.dim, fontSize: 13, fontStyle: "italic" }}>No {selectedSpell} subtypes matching "{subtypeSearch.trim()}"</Text>
+                      </View>
+                    );
+                  }
+                  return (
+                    <ScrollView style={{ maxHeight: 200, marginBottom: 4 }} nestedScrollEnabled keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+                      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingBottom: 8 }}>
+                        {filteredCastSubs.map(st => (
+                          <TouchableOpacity key={st}
+                            style={[{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1.5 },
+                              spellSubtype === st ? { backgroundColor: C.accentDim, borderColor: C.accent }
+                              : spellSubtype2 === st ? { backgroundColor: C.accentDim, borderColor: C.accent }
+                              : { backgroundColor: C.cardAlt, borderColor: C.border }]}
+                            onPress={() => {
+                              if (spellSubtype === st) { setSpellSubtype(null); }
+                              else if (spellSubtype === null) { setSpellSubtype(st); }
+                              else { setSpellSubtype2(spellSubtype2 === st ? null : st); }
+                            }}>
+                            <Text style={{ color: (spellSubtype === st || spellSubtype2 === st) ? C.accent : C.muted, fontSize: 12, fontWeight: "600" }}>{st}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </ScrollView>
+                  );
+                })()}
                 {(spellSubtype || spellSubtype2) && (
                   <Text style={[s.reminderDesc, { marginBottom: 12 }]}>
                     Selected: {[spellSubtype, spellSubtype2].filter(Boolean).join(" / ")}{"  "}
                     <Text style={{ color: C.danger }} onPress={() => { setSpellSubtype(null); setSpellSubtype2(null); }}>✕ Clear</Text>
                   </Text>
                 )}
-              </>)}
+              </>))}
 
               {/* CREATURE-SPECIFIC */}
               {selectedSpell === "Creature" && (<>
@@ -3823,8 +4031,10 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                       name: spellName.trim() || selectedSpell,
                       type: selectedSpell,
                       supertype: spellSupertype ?? undefined,
-                      subtype: spellSubtype ?? undefined,
-                      subtype2: spellSubtype2 ?? undefined,
+                      subtype: selectedSpell === "Creature" ? (creatureSubtypes[0] ?? undefined) : (spellSubtype ?? undefined),
+                      subtype2: selectedSpell === "Creature" ? (creatureSubtypes[1] ?? undefined) : (spellSubtype2 ?? undefined),
+                      subtypes: selectedSpell === "Creature" ? (creatureSubtypes.length > 0 ? creatureSubtypes : undefined) : undefined,
+                      hasAllCreatureTypes: selectedSpell === "Creature" ? (spellHasAllCreatureTypes || undefined) : undefined,
                       isToken: false,
                       power: spellPower !== "" ? parseInt(spellPower, 10) : undefined,
                       toughness: spellToughness !== "" ? parseInt(spellToughness, 10) : undefined,

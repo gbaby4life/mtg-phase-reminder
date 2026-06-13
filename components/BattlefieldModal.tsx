@@ -2,7 +2,8 @@ import React, { useState } from "react";
 import { View, Text, TouchableOpacity, ScrollView, Modal, StyleSheet } from "react-native";
 import { C, formatManaCostLabel, formatManaCostSymbols, formatManaCostSymbolsWithTax, getManaCostValue, hasManaCost } from "../lib/types";
 import type { GameState, Action, CastSpell, CreatureCounterType, CommanderRecord, ManaPool } from "../lib/types";
-import { getResourceTokenKind } from "../System/resourceTokenSystem";
+import { getResourceTokenKind, getResourceTokenCompactText, getResourceTokenFullText, getResourceTokenActivationCostText } from "../System/resourceTokenSystem";
+import ResourceTokenCostConfirmModal from "./modals/ResourceTokenCostConfirmModal";
 
 const MANA_COLORS_BF: { key: keyof ManaPool; label: string; emoji: string }[] = [
   { key: "white",    label: "White",    emoji: "☀️" },
@@ -69,6 +70,8 @@ export default function BattlefieldModal({ visible, onClose, state, dispatch, on
   const [mapPickSpellId, setMapPickSpellId] = useState<string | null>(null);
   const [mapPickResult, setMapPickResult] = useState<"land" | "nonland" | "unknown" | null>(null);
   const [mapPickTargetId, setMapPickTargetId] = useState<string | null>(null);
+  const [costConfirmSpellId, setCostConfirmSpellId] = useState<string | null>(null);
+  const [costConfirmFollowUp, setCostConfirmFollowUp] = useState<"dispatch" | "map" | null>(null);
   const [counterSheetSpellId, setCounterSheetSpellId] = useState<string | null>(null);
   const [commanderDamageSource, setCommanderDamageSource] = useState<CastSpell | null>(null);
   const [commanderDamageDefenderId, setCommanderDamageDefenderId] = useState<string | null>(null);
@@ -173,6 +176,7 @@ export default function BattlefieldModal({ visible, onClose, state, dispatch, on
                   >
                     <Text style={styles.tileName}>{sp.name}</Text>
                     <Text style={styles.commanderBadge}>{kind === "generic" ? "Resource Token" : kind}</Text>
+                    <Text style={styles.tileCounters}>{getResourceTokenCompactText(kind)}</Text>
                     <Text style={[styles.tileOwner, { color: ownerColor }]}>{owner?.name ?? "Unknown"}</Text>
                     <View style={styles.tileStatusRow}>
                       {sp.tapped && <Text style={styles.tileStatus}>TAPPED</Text>}
@@ -366,28 +370,31 @@ export default function BattlefieldModal({ visible, onClose, state, dispatch, on
                       <View style={styles.counterHeader}>
                         <Text style={styles.counterHeaderText}>Token Actions</Text>
                       </View>
+                      <Text style={{ color: C.muted, fontSize: 12, fontStyle: "italic", textAlign: "center", paddingHorizontal: 4 }}>
+                        {getResourceTokenFullText(kind)}
+                      </Text>
                       {kind === "Treasure" && (
                         <TouchableOpacity style={styles.actionBtn} onPress={() => { setPickColorSpellId(liveActive.id); setActiveSpell(null); }}>
                           <Text style={styles.actionBtnText}>◈ Crack Treasure</Text>
                         </TouchableOpacity>
                       )}
                       {kind === "Food" && (
-                        <TouchableOpacity style={styles.actionBtn} onPress={() => { dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: liveActive.id, intent: "use" }); setActiveSpell(null); }}>
+                        <TouchableOpacity style={styles.actionBtn} onPress={() => { setCostConfirmSpellId(liveActive.id); setCostConfirmFollowUp("dispatch"); setActiveSpell(null); }}>
                           <Text style={styles.actionBtnText}>Use — Gain 3 Life</Text>
                         </TouchableOpacity>
                       )}
                       {kind === "Clue" && (
-                        <TouchableOpacity style={styles.actionBtn} onPress={() => { dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: liveActive.id, intent: "use" }); setActiveSpell(null); }}>
+                        <TouchableOpacity style={styles.actionBtn} onPress={() => { setCostConfirmSpellId(liveActive.id); setCostConfirmFollowUp("dispatch"); setActiveSpell(null); }}>
                           <Text style={styles.actionBtnText}>Use — Draw 1 Card</Text>
                         </TouchableOpacity>
                       )}
                       {kind === "Blood" && (
-                        <TouchableOpacity style={styles.actionBtn} onPress={() => { dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: liveActive.id, intent: "use" }); setActiveSpell(null); }}>
+                        <TouchableOpacity style={styles.actionBtn} onPress={() => { setCostConfirmSpellId(liveActive.id); setCostConfirmFollowUp("dispatch"); setActiveSpell(null); }}>
                           <Text style={styles.actionBtnText}>Use — Draw 1, Discard 1</Text>
                         </TouchableOpacity>
                       )}
                       {kind === "Map" && (
-                        <TouchableOpacity style={styles.actionBtn} onPress={() => { setMapPickSpellId(liveActive.id); setActiveSpell(null); }}>
+                        <TouchableOpacity style={styles.actionBtn} onPress={() => { setCostConfirmSpellId(liveActive.id); setCostConfirmFollowUp("map"); setActiveSpell(null); }}>
                           <Text style={styles.actionBtnText}>Use — Explore</Text>
                         </TouchableOpacity>
                       )}
@@ -714,6 +721,35 @@ export default function BattlefieldModal({ visible, onClose, state, dispatch, on
           </View>
         </Modal>
       </View>
+
+      {/* ── COST CONFIRMATION ── */}
+      {(() => {
+        const confirmSpell = costConfirmSpellId ? state.spellLog.find(x => x.id === costConfirmSpellId) : null;
+        const confirmKind = confirmSpell ? getResourceTokenKind(confirmSpell.name) : "generic" as const;
+        const fullText = getResourceTokenFullText(confirmKind);
+        const costText = getResourceTokenActivationCostText(confirmKind);
+        const colonIdx = fullText.indexOf(": ");
+        const effectText = colonIdx >= 0 ? fullText.slice(colonIdx + 2) : fullText;
+        return (
+          <ResourceTokenCostConfirmModal
+            visible={!!costConfirmSpellId}
+            tokenName={confirmSpell?.name ?? ""}
+            rulesText={fullText}
+            costText={costText}
+            effectText={effectText}
+            onCancel={() => { setCostConfirmSpellId(null); setCostConfirmFollowUp(null); }}
+            onConfirm={() => {
+              if (costConfirmFollowUp === "dispatch" && costConfirmSpellId) {
+                dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: costConfirmSpellId, intent: "use" });
+              } else if (costConfirmFollowUp === "map" && costConfirmSpellId) {
+                setMapPickSpellId(costConfirmSpellId);
+              }
+              setCostConfirmSpellId(null);
+              setCostConfirmFollowUp(null);
+            }}
+          />
+        );
+      })()}
     </Modal>
   );
 }
