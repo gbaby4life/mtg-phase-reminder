@@ -16,16 +16,9 @@ import {
   resetEventReminderTurnFlags, deactivateRemindersForSpell,
 } from "../../System/reminderSystem";
 import { searchCardNames, CardNameRecord } from "../../System/cardSearchSystem";
-
-// ─── COLORS ───────────────────────────────────────────────────────────────────
-const C = {
-  bg: "#0B1020", card: "#151A2A", cardAlt: "#1D2438",
-  border: "#252D45", text: "#FFFFFF", muted: "#AAB2C8",
-  dim: "#5A6480", accent: "#7C5CFF", accentDim: "#3D2E80",
-  danger: "#FF5C7A", dangerDim: "#7A1F30", success: "#4ADE80",
-  successDim: "#1A5C35", warning: "#FACC15", warningDim: "#6B5000",
-  overlay: "rgba(0,0,0,0.8)",
-};
+import { C } from "../../lib/types";
+import type { HistoryEntry, CastSpell, GraveyardEntry, ExileEntry, TokenGYEntry, ManaPool, Player, GameState, Action } from "../../lib/types";
+import BattlefieldModal from "../../components/BattlefieldModal";
 
 const PHASES = [
   "Untap", "Upkeep", "Draw", "Main Phase 1",
@@ -176,96 +169,6 @@ const MTG_SUBTYPES_BY_TYPE: Record<string, readonly string[]> = {
   Other:        [],
 };
 
-type HistoryEntry = {
-  id: string; turnNumber: number; phase: string; message: string; timestamp: number;
-  playerId: string;
-};
-
-type CastSpell = {
-  id: string;
-  name: string;
-  type: string;
-  playerId?: string;
-  supertype?: string;
-  subtype?: string;
-  subtype2?: string;
-  turnNumber: number;
-  phase: string;
-  zone: "active" | "graveyard" | "exile";
-  isToken: boolean;
-  tokenCategory?: "creature" | "resource" | "status";
-  // Creature
-  power?: number;
-  toughness?: number;
-  manaValue?: number;
-  abilities?: string[];
-  // Planeswalker
-  startingLoyalty?: number;
-  currentLoyalty?: number;
-  // Battle
-  startingDefense?: number;
-  currentDefense?: number;
-  // Land
-  produces?: string;
-  tapped?: boolean;
-  // Enchantment Aura / Artifact Equipment
-  attachedTo?: string;
-  // All non-creature spells
-  effectNote?: string;
-};
-
-type GraveyardEntry = {
-  id: string; name: string; type: string;
-  turnNumber: number; phase: string; timestamp: number;
-  source: "died" | "sacrificed" | "resolved" | "destroyed";
-  playerId?: string;
-};
-
-type ExileEntry = {
-  id: string; name: string; type: string;
-  turnNumber: number; phase: string; timestamp: number;
-  playerId?: string;
-};
-
-type TokenGYEntry = {
-  id: string; name: string;
-  tokenCategory: "creature" | "resource";
-  action: "died" | "sacrificed" | "cracked";
-  turnNumber: number; phase: string; timestamp: number;
-  playerId?: string;
-};
-
-type ManaPool = {
-  white:     { auto: number; manual: number };
-  blue:      { auto: number; manual: number };
-  black:     { auto: number; manual: number };
-  red:       { auto: number; manual: number };
-  green:     { auto: number; manual: number };
-  colorless: { auto: number; manual: number };
-};
-
-type Player = { id: string; name: string; isUser: boolean; life: number };
-
-type GameState = {
-  screen: "menu" | "setup" | "game" | "opponent-turn";
-  isMyTurn: boolean;
-  activePhaseView: string | null;
-  playerName: string; life: number; startingLife: number;
-  gameType: string; turnNumber: number; phaseIndex: number;
-  phaseLocked: boolean; cardsDrawn: number; landsPlayed: number;
-  reminders: Reminder[];
-  pendingReminderFires: ReminderFireInstance[];
-  history: HistoryEntry[]; spellLog: CastSpell[];
-  graveyard: GraveyardEntry[]; exile: ExileEntry[]; tokenGY: TokenGYEntry[];
-  manaPool: ManaPool;
-  players: Player[];
-  currentPlayerIndex: number;
-  turnOrder: string[];
-  firstPlayerIndex: number;
-  opponentPhaseIndex: number;
-  eventOwnerPlayerId: string | null;
-};
-
 const INIT: GameState = {
   screen: "menu", isMyTurn: true, activePhaseView: null,
   playerName: "Player 1", life: 20, startingLife: 20,
@@ -291,56 +194,6 @@ const INIT: GameState = {
   eventOwnerPlayerId: null,
 };
 
-type Action =
-  | { type: "GO_SETUP" } | { type: "GO_MENU" }
-  | { type: "START_GAME"; playerName: string; life: number; gameType: string; players: Player[]; turnOrder: string[]; firstPlayerIndex: number }
-  | { type: "END_OPPONENT_TURN" }
-  | { type: "END_MY_TURN" }
-  | { type: "NEXT_PHASE" } | { type: "PREV_PHASE" }
-  | { type: "SET_ACTIVE_PHASE"; phase: string }
-  | { type: "CLEAR_ACTIVE_PHASE" }
-  | { type: "LOCK_PHASE" } | { type: "UNLOCK_PHASE" }
-  | { type: "CHANGE_LIFE"; delta: number; playerId?: string } | { type: "CHANGE_LIFE_SILENT"; delta: number; playerId?: string } | { type: "SET_LIFE"; value: number; playerId?: string }
-  // Reminder actions
-  | { type: "RESOLVE_REMINDER"; id: string; skipEffect?: boolean }
-  | { type: "SKIP_REMINDER"; id: string }
-  | { type: "UNSKIP_REMINDER"; id: string }
-  | { type: "MISS_REMINDER"; id: string }
-  | { type: "TOGGLE_REMINDER"; id: string }
-  | { type: "ADD_REMINDER"; reminder: Reminder }
-  | { type: "EDIT_REMINDER"; id: string; updates: Partial<Omit<Reminder, "id">> }
-  | { type: "DELETE_REMINDER"; id: string }
-  // Reminder fire actions (event-based reminders that fired and need player attention)
-  | { type: "FIRE_REMINDER_EVENT"; events: string[]; context?: ReminderContext }
-  | { type: "RESOLVE_REMINDER_FIRE"; fireId: string }
-  | { type: "PARK_REMINDER_FIRE"; fireId: string }
-  | { type: "CLEAR_PENDING_REMINDER_FIRES" }
-  | { type: "RESET_REMINDER_TURN_FLAGS" }
-  // Other actions
-  | { type: "LOG"; message: string; playerId?: string }
-  | { type: "LOG_EVENT"; eventType: string; detail: string; playerId?: string }
-  | { type: "CAST_SPELL"; spellData: Omit<CastSpell, "id" | "turnNumber" | "phase" | "zone"> }
-  | { type: "DELETE_SPELL"; id: string }
-  | { type: "EDIT_SPELL"; id: string; updates: Partial<Omit<CastSpell, "id" | "turnNumber" | "phase" | "zone">> }
-  | { type: "UPDATE_LOYALTY"; id: string; delta: number }
-  | { type: "UPDATE_DEFENSE"; id: string; delta: number }
-  | { type: "ADD_CARDS_DRAWN"; amount: number }
-  | { type: "ADD_LAND" }
-  | { type: "MOVE_TO_GY"; spellId: string; source: "died" | "sacrificed" | "resolved" | "destroyed" }
-  | { type: "MOVE_TO_EXILE"; spellId: string }
-  | { type: "RETURN_FROM_GY"; gyEntryId: string }
-  | { type: "RETURN_FROM_EXILE"; exileEntryId: string }
-  | { type: "DELETE_FROM_GY"; gyEntryId: string }
-  | { type: "DELETE_FROM_EXILE"; exileEntryId: string }
-  | { type: "ADD_TOKEN_TO_GY"; entry: TokenGYEntry }
-  | { type: "ADD_AUTO_MANA"; color: keyof ManaPool; amount: number }
-  | { type: "ADD_MANUAL_MANA"; color: keyof ManaPool; amount: number }
-  | { type: "SUBTRACT_MANUAL_MANA"; color: keyof ManaPool; amount: number }
-  | { type: "RESET_MANUAL_MANA" }
-  | { type: "RESET_AUTO_MANA" }
-  | { type: "SET_EVENT_OWNER"; playerId: string }
-  | { type: "RESET_EVENT_OWNER" };
-
 function logEntry(state: GameState, message: string, playerId?: string): HistoryEntry {
   const pid = playerId ?? state.eventOwnerPlayerId ?? state.turnOrder[state.currentPlayerIndex] ?? "system";
   return { id: `h${Date.now()}${Math.random()}`, turnNumber: state.turnNumber, phase: PHASES[state.phaseIndex], message, timestamp: Date.now(), playerId: pid };
@@ -352,6 +205,15 @@ function updatePlayerLife(players: Player[], playerId: string, updater: (life: n
 
 function getActivePlayerId(state: GameState, fallbackPlayerId?: string): string {
   return fallbackPlayerId ?? state.eventOwnerPlayerId ?? state.turnOrder[state.currentPlayerIndex] ?? state.players[0]?.id ?? "p1";
+}
+
+function fireMatchingEvents(state: GameState, reminders: Reminder[], pendingReminderFires: ReminderFireInstance[], events: string[]): { reminders: Reminder[]; pendingReminderFires: ReminderFireInstance[] } {
+  if (events.length === 0) return { reminders, pendingReminderFires };
+  const currentPhase = PHASES[state.phaseIndex];
+  const firedR = getMatchingEventReminders(reminders, events, currentPhase, state.isMyTurn);
+  const updatedReminders = recordEventReminderFires(reminders, firedR);
+  const newInstances: ReminderFireInstance[] = firedR.map(fr => ({ id: `fire-${fr.id}-${Date.now()}-${Math.random()}`, reminderId: fr.id, firedPhase: currentPhase, firedTurn: state.turnNumber, triggeredByUser: state.isMyTurn }));
+  return { reminders: updatedReminders, pendingReminderFires: [...pendingReminderFires, ...newInstances] };
 }
 
 function reminderHasLifeEffect(r: Reminder): boolean {
@@ -449,7 +311,7 @@ function reducer(state: GameState, action: Action): GameState {
     case "RESOLVE_REMINDER": {
       const r = state.reminders.find(x => x.id === action.id);
       if (!r) return state;
-      const reminders = state.reminders.map(x => x.id === action.id ? { ...x, status: "resolved" as const } : x);
+      let reminders = state.reminders.map(x => x.id === action.id ? { ...x, status: "resolved" as const } : x);
       const entry = logEntry(state, `✓ Resolved: ${r.name}`);
       if (action.skipEffect) {
         return { ...state, reminders, history: [...state.history, entry] };
@@ -466,6 +328,22 @@ function reducer(state: GameState, action: Action): GameState {
       let landsPlayed = state.landsPlayed + (result.landsPlayedDelta ?? 0);
       let manaPool = { ...state.manaPool };
       let spellLog = state.spellLog;
+      const triggeredEvents: string[] = [];
+      if ((result.cardsDrawnDelta ?? 0) > 0) triggeredEvents.push("Card is drawn");
+      if ((result.landsPlayedDelta ?? 0) > 0) triggeredEvents.push("Land is played", "Basic land enters");
+
+      const currentPhase = PHASES[state.phaseIndex];
+      const firedR = triggeredEvents.length > 0
+        ? getMatchingEventReminders(reminders, triggeredEvents, currentPhase, state.isMyTurn)
+        : [];
+      reminders = firedR.length > 0 ? recordEventReminderFires(reminders, firedR) : reminders;
+      const newInstances: ReminderFireInstance[] = firedR.map(eventReminder => ({
+        id: `fire-${eventReminder.id}-${Date.now()}-${Math.random()}`,
+        reminderId: eventReminder.id,
+        firedPhase: currentPhase,
+        firedTurn: state.turnNumber,
+        triggeredByUser: state.isMyTurn,
+      }));
       if (result.manaAdded) {
         for (const m of result.manaAdded) {
           const ck = m.color as keyof ManaPool;
@@ -483,7 +361,18 @@ function reducer(state: GameState, action: Action): GameState {
       }
       const histEntries = [entry];
       if (result.logMessage) histEntries.push(logEntry(state, result.logMessage));
-      return { ...state, reminders, players, life, cardsDrawn, landsPlayed, spellLog, manaPool, history: [...state.history, ...histEntries] };
+      return {
+        ...state,
+        reminders,
+        players,
+        life,
+        cardsDrawn,
+        landsPlayed,
+        spellLog,
+        manaPool,
+        pendingReminderFires: [...state.pendingReminderFires, ...newInstances],
+        history: [...state.history, ...histEntries],
+      };
     }
     case "SKIP_REMINDER": return { ...state, reminders: state.reminders.map(r => r.id === action.id ? { ...r, status: "skipped" as const } : r) };
     case "UNSKIP_REMINDER": return { ...state, reminders: state.reminders.map(r => r.id === action.id ? { ...r, status: "pending" as const } : r) };
@@ -771,6 +660,90 @@ function reducer(state: GameState, action: Action): GameState {
     }
     case "CLEAR_PENDING_REMINDER_FIRES": return { ...state, pendingReminderFires: [] };
     case "RESET_REMINDER_TURN_FLAGS": return { ...state, reminders: resetEventReminderTurnFlags(state.reminders) };
+    case "TOGGLE_TAPPED": {
+      const sp = state.spellLog.find(x => x.id === action.spellId);
+      if (!sp) return state;
+      const newTapped = !sp.tapped;
+      const spellLog = state.spellLog.map(x => x.id === action.spellId ? { ...x, tapped: newTapped } : x);
+      const entry = logEntry(state, `${sp.name} becomes ${newTapped ? "tapped" : "untapped"}`, sp.playerId);
+      const { reminders, pendingReminderFires } = fireMatchingEvents(state, state.reminders, state.pendingReminderFires, [newTapped ? "Creature becomes tapped" : "Creature becomes untapped"]);
+      return { ...state, spellLog, reminders, pendingReminderFires, history: [...state.history, entry] };
+    }
+    case "DECLARE_ATTACKER": {
+      const sp = state.spellLog.find(x => x.id === action.spellId);
+      if (!sp) return state;
+      const wasTapped = !!sp.tapped;
+      const spellLog = state.spellLog.map(x => x.id === action.spellId ? { ...x, tapped: true, attacking: true, blockingId: null, blockedByIds: x.blockedByIds ?? [] } : x);
+      const entry = logEntry(state, `⚔ ${sp.name} attacks`, sp.playerId);
+      const events = wasTapped ? [] : ["Creature becomes tapped"];
+      const { reminders, pendingReminderFires } = fireMatchingEvents(state, state.reminders, state.pendingReminderFires, events);
+      return { ...state, spellLog, reminders, pendingReminderFires, history: [...state.history, entry] };
+    }
+    case "REMOVE_FROM_COMBAT": {
+      const sp = state.spellLog.find(x => x.id === action.spellId);
+      if (!sp) return state;
+      const blockerIds = sp.blockedByIds ?? [];
+      const attackerIds = sp.blockingId ? [sp.blockingId] : [];
+      const spellLog = state.spellLog.map(x => {
+        if (x.id === action.spellId) return { ...x, attacking: false, blockedByIds: [], blockingId: null };
+        if (blockerIds.includes(x.id)) return { ...x, blockingId: null };
+        if (attackerIds.includes(x.id)) return { ...x, blockedByIds: (x.blockedByIds ?? []).filter(id => id !== action.spellId) };
+        return x;
+      });
+      const entry = logEntry(state, `${sp.name} removed from combat`, sp.playerId);
+      return { ...state, spellLog, history: [...state.history, entry] };
+    }
+    case "ASSIGN_BLOCKER": {
+      const blocker = state.spellLog.find(x => x.id === action.blockerId);
+      const attacker = state.spellLog.find(x => x.id === action.attackerId);
+      if (!blocker || !attacker) return state;
+      if (!attacker.attacking) return state;
+      if (blocker.zone !== "active") return state;
+      const isCreature = blocker.type === "Creature" || (blocker.isToken && blocker.tokenCategory === "creature");
+      if (!isCreature) return state;
+      const prevAttackerId = blocker.blockingId;
+      const spellLog = state.spellLog.map(x => {
+        if (x.id === action.blockerId) return { ...x, blockingId: action.attackerId };
+        if (x.id === action.attackerId) return { ...x, blockedByIds: [...new Set([...(x.blockedByIds ?? []), action.blockerId])] };
+        if (prevAttackerId && x.id === prevAttackerId) return { ...x, blockedByIds: (x.blockedByIds ?? []).filter(id => id !== action.blockerId) };
+        return x;
+      });
+      const entry = logEntry(state, `🛡 Block declared: ${blocker.name} blocks ${attacker.name}`, blocker.playerId);
+      return { ...state, spellLog, history: [...state.history, entry] };
+    }
+    case "REMOVE_BLOCKER": {
+      const blocker = state.spellLog.find(x => x.id === action.blockerId);
+      if (!blocker || !blocker.blockingId) return state;
+      const attackerId = blocker.blockingId;
+      const spellLog = state.spellLog.map(x => {
+        if (x.id === action.blockerId) return { ...x, blockingId: null };
+        if (x.id === attackerId) return { ...x, blockedByIds: (x.blockedByIds ?? []).filter(id => id !== action.blockerId) };
+        return x;
+      });
+      const entry = logEntry(state, `Block removed: ${blocker.name}`, blocker.playerId);
+      return { ...state, spellLog, history: [...state.history, entry] };
+    }
+    case "CLEAR_COMBAT": {
+      const spellLog = state.spellLog.map(x => ({ ...x, attacking: false, blockedByIds: [], blockingId: null }));
+      const entry = logEntry(state, "Combat cleared");
+      return { ...state, spellLog, history: [...state.history, entry] };
+    }
+    case "CHANGE_CREATURE_COUNTER": {
+      const sp = state.spellLog.find(x => x.id === action.spellId);
+      if (!sp) return state;
+      if (sp.zone !== "active") return state;
+      const isCreature = sp.type === "Creature" || (sp.isToken && sp.tokenCategory === "creature");
+      if (!isCreature) return state;
+      const current = sp.counters?.[action.counterType] ?? 0;
+      const next = Math.max(0, current + action.delta);
+      const counters = next === 0
+        ? Object.fromEntries(Object.entries(sp.counters ?? {}).filter(([k]) => k !== action.counterType)) as typeof sp.counters
+        : { ...sp.counters, [action.counterType]: next };
+      const spellLog = state.spellLog.map(x => x.id === action.spellId ? { ...x, counters } : x);
+      const sign = action.delta > 0 ? "+" : "";
+      const entry = logEntry(state, `${sp.name}: ${action.counterType} counter ${sign}${action.delta}`, sp.playerId);
+      return { ...state, spellLog, history: [...state.history, entry] };
+    }
     default: return state;
   }
 }
@@ -949,6 +922,7 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
 function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dispatch<Action> }) {
   const [confirmModal, setConfirmModal] = useState(false);
   const [hubModal, setHubModal] = useState(false);
+  const [battlefieldModal, setBattlefieldModal] = useState(false);
   const [endGameModal, setEndGameModal] = useState(false);
   const [historyModal, setHistoryModal] = useState(false);
   const [historyTab, setHistoryTab] = useState<string>("all");
@@ -1776,7 +1750,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 { icon: "📜", label: "History", sub: `${state.history.length} entries`, action: () => { setHubModal(false); setHistoryModal(true); } },
                 { icon: "✦", label: "Spell Log", sub: `${state.spellLog.length} spells`, action: () => { setHubModal(false); setSpellLogModal(true); } },
                 !isOppTurn ? { icon: "↩", label: "Undo Last", sub: "Coming soon", action: () => {} } : null,
-                !isOppTurn ? { icon: "⚔️", label: "Battlefield", sub: "Coming soon", action: () => {} } : null,
+                { icon: "⚔️", label: "Battlefield", sub: "View the field", action: () => { setHubModal(false); setBattlefieldModal(true); } },
                 { icon: "💎", label: "Mana Pool", sub: "Track mana", action: () => { setHubModal(false); setManaModal(true); } },
                 { icon: "🔔", label: "Reminders", sub: `${state.reminders.filter(r => r.status === "pending").length} pending`, action: () => { setHubModal(false); setRemindersListModal(true); } },
                 { icon: "⚡", label: "Game Events", sub: "Any player · any phase", action: () => { setHubEventOwner(state.turnOrder[state.currentPlayerIndex]); setHubModal(false); setHubEventsModal(true); } },
@@ -2049,15 +2023,15 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
           <View style={[s.sheet, { maxHeight: "75%", flex: 1 }]}>
             <View style={s.handle} />
             <Text style={s.sheetTitle}>Spell Log</Text>
-            {state.spellLog.length === 0 ? (
+            {!state.spellLog.some(sp => sp.type !== "Land") ? (
               <Text style={{ color: C.dim, textAlign: "center", paddingVertical: 24 }}>No spells cast yet.</Text>
             ) : (
               <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 8 }} showsVerticalScrollIndicator={false}>
                 {/* Active spells */}
-                {state.spellLog.filter(sp => sp.zone === "active").length > 0 && (
+                {state.spellLog.filter(sp => sp.zone === "active" && sp.type !== "Land").length > 0 && (
                   <>
                     <Text style={[s.sectionLabel, { paddingHorizontal: 14, paddingTop: 8 }]}>On Battlefield</Text>
-                    {state.spellLog.filter(sp => sp.zone === "active").map(sp => {
+                    {state.spellLog.filter(sp => sp.zone === "active" && sp.type !== "Land").map(sp => {
                       const spellOwnerColor = sp.playerId
                         ? (state.players.find(p => p.id === sp.playerId)?.isUser ? C.accent : "#F59E0B")
                         : C.border;
@@ -2074,10 +2048,10 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                   </>
                 )}
                 {/* Historical spells — GY and Exile */}
-                {state.spellLog.filter(sp => sp.zone !== "active").length > 0 && (
+                {state.spellLog.filter(sp => sp.zone !== "active" && sp.type !== "Land").length > 0 && (
                   <>
                     <Text style={[s.sectionLabel, { paddingHorizontal: 14, paddingTop: 12 }]}>Left Battlefield</Text>
-                    {state.spellLog.filter(sp => sp.zone !== "active").map(sp => {
+                    {state.spellLog.filter(sp => sp.zone !== "active" && sp.type !== "Land").map(sp => {
                       const spellOwnerColor = sp.playerId
                         ? (state.players.find(p => p.id === sp.playerId)?.isUser ? C.accent : "#F59E0B")
                         : C.border;
@@ -4102,6 +4076,13 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
         </View>
       </Modal>
 
+      <BattlefieldModal
+        visible={battlefieldModal}
+        onClose={() => setBattlefieldModal(false)}
+        state={state}
+        dispatch={dispatch}
+        onOpenHub={() => { setBattlefieldModal(false); setHubModal(true); }}
+      />
     </> ); }
 
 }
