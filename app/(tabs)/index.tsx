@@ -354,6 +354,10 @@ function getActivePlayerId(state: GameState, fallbackPlayerId?: string): string 
   return fallbackPlayerId ?? state.eventOwnerPlayerId ?? state.turnOrder[state.currentPlayerIndex] ?? state.players[0]?.id ?? "p1";
 }
 
+function reminderHasLifeEffect(r: Reminder): boolean {
+  return r.effects.some(e => e.timing === "immediate" && (e.effectType === "gain-life" || e.effectType === "lose-life" || e.effectType === "pay-life"));
+}
+
 function reducer(state: GameState, action: Action): GameState {
   switch (action.type) {
     case "GO_SETUP": return { ...state, screen: "setup" };
@@ -456,11 +460,7 @@ function reducer(state: GameState, action: Action): GameState {
         return { ...state, reminders, history: [...state.history, entry] };
       }
       const result = applyImmediateEffects(r);
-      const lifePlayerId = getActivePlayerId(state);
       let players = state.players;
-      if (result.lifeDelta) {
-        players = updatePlayerLife(players, lifePlayerId, l => l + (result.lifeDelta ?? 0));
-      }
       let life = players.find(p => p.isUser)?.life ?? state.life;
       let cardsDrawn = state.cardsDrawn + (result.cardsDrawnDelta ?? 0);
       let landsPlayed = state.landsPlayed + (result.landsPlayedDelta ?? 0);
@@ -707,7 +707,7 @@ function reducer(state: GameState, action: Action): GameState {
       const r = state.reminders.find(x => x.id === fire.reminderId);
       if (!r) return state;
       const myPlayerId = state.players.find(p => p.isUser)?.id;
-      const entryMsg = fire.triggeredByUser
+      const entryMsg = (fire.triggeredByUser || reminderHasLifeEffect(r))
         ? `✓ ${r.name}: resolved`
         : `📋 ${r.name}: noted (opponent's action — no effect applied to your stats)`;
       const entry = logEntry(state, entryMsg, myPlayerId);
@@ -715,11 +715,7 @@ function reducer(state: GameState, action: Action): GameState {
         return { ...state, pendingReminderFires: state.pendingReminderFires.filter(x => x.id !== action.fireId), history: [...state.history, entry] };
       }
       const result = applyImmediateEffects(r);
-      const lifePlayerId = getActivePlayerId(state, myPlayerId);
       let players = state.players;
-      if (result.lifeDelta) {
-        players = updatePlayerLife(players, lifePlayerId, l => l + (result.lifeDelta ?? 0));
-      }
       let life = players.find(p => p.isUser)?.life ?? state.life;
       let cardsDrawn = state.cardsDrawn + (result.cardsDrawnDelta ?? 0);
       let landsPlayed = state.landsPlayed + (result.landsPlayedDelta ?? 0);
@@ -994,14 +990,11 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [activeExileEntry, setActiveExileEntry] = useState<ExileEntry | null>(null);
   const [addManaModal, setAddManaModal] = useState(false);
   const [othersModal, setOthersModal] = useState(false);
-  const [gainLoseLifeModal, setGainLoseLifeModal] = useState(false);
   const [millModal, setMillModal] = useState(false);
   const [tutorModal, setTutorModal] = useState(false);
   const [dealDamageModal, setDealDamageModal] = useState(false);
   const [copyModal, setCopyModal] = useState(false);
   const [manaEventAmounts, setManaEventAmounts] = useState<Record<string, number>>({ white: 0, blue: 0, black: 0, red: 0, green: 0, colorless: 0 });
-  const [gainLoseMode, setGainLoseMode] = useState<"gain" | "lose">("gain");
-  const [gainLoseQty, setGainLoseQty] = useState(1);
   const [millTarget, setMillTarget] = useState<"self" | "opponent">("self");
   const [millQty, setMillQty] = useState(1);
   const [tutorNote, setTutorNote] = useState("");
@@ -1033,8 +1026,11 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [phaseReminderPopup, setPhaseReminderPopup] = useState(false);
   const [reminderPopupMode, setReminderPopupMode] = useState<"once-per-phase-per-turn" | "always">("once-per-phase-per-turn");
   const [shownPhaseReminderKeys, setShownPhaseReminderKeys] = useState<string[]>([]);
+  const [lifeCounterModal, setLifeCounterModal] = useState(false);
+  const [lifeCounterHint, setLifeCounterHint] = useState<string | null>(null);
   // Unified reminder builder state
   const [ubName, setUbName] = useState("");
+  const [ubNameSuggestions, setUbNameSuggestions] = useState<CardNameRecord[]>([]);
   const [ubDescription, setUbDescription] = useState("");
   const [ubFireMode, setUbFireMode] = useState<"phase" | "event">("phase");
   const [ubPhases, setUbPhases] = useState<string[]>([]);
@@ -1064,6 +1060,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const canPlayExtraLands = extraLandPlays > 0;
   const isOppTurn = !state.isMyTurn;
   const currentTurnPlayerId = state.turnOrder[state.currentPlayerIndex];
+  const userLife = state.players.find(p => p.id === currentTurnPlayerId)?.life ?? state.life;
   const displayLands = isOppTurn
     ? state.spellLog.filter(sp =>
         sp.type === "Land" &&
@@ -1079,7 +1076,6 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const activePhase = state.activePhaseView ?? phase;
   const activeReminders = state.reminders.filter(r => {
     if (r.fireMode !== "phase") return false;
-    if (r.status === "resolved") return false;
     if (r.status === "missed") return false;
     if (r.status === "inactive") return false;
 
@@ -1096,7 +1092,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
 
     if (!phaseMatches) return false;
 
-    return r.status === "active" || r.status === "pending" || r.status === "skipped";
+    return r.status === "active" || r.status === "pending" || r.status === "skipped" || r.status === "resolved";
   });
   const unresolved = activeReminders.filter(r => r.status === "active" || r.status === "pending");
   const pulseAnim = useRef(new Animated.Value(0)).current;
@@ -1135,13 +1131,13 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
     const anyOpen =
       spellModal || spellDetailModal || drawModal || creatureModal ||
       landModal || tokenModal || addManaModal || othersModal ||
-      gainLoseLifeModal || genericEvent !== null;
+      genericEvent !== null;
     if (!anyOpen) {
       hubOwnerRef.current = null;
       dispatch({ type: "RESET_EVENT_OWNER" });
     }
   }, [spellModal, spellDetailModal, drawModal, creatureModal, landModal,
-      tokenModal, addManaModal, othersModal, gainLoseLifeModal, genericEvent]);
+      tokenModal, addManaModal, othersModal, genericEvent]);
 
   useEffect(() => {
     const prevPhaseView = prevActivePhaseViewRef.current;
@@ -1204,7 +1200,29 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
     setSubtypeSearch("");
   }
 
+  function getLifeEffectHint(r: Reminder): string | null {
+    const fx = r.effects.find(e =>
+      e.timing === "immediate" &&
+      (e.effectType === "gain-life" || e.effectType === "lose-life" || e.effectType === "pay-life")
+    );
+    if (!fx) return null;
+    const sign = fx.effectType === "gain-life" ? "+" : "−";
+    return `${r.name} — suggested ${sign}${fx.amount ?? 1} life`;
+  }
+
+  function eventForSpellType(type: string | null): string {
+    return type === "Creature" ? "Creature enters the battlefield"
+      : type === "Instant" ? "Instant is cast"
+      : type === "Sorcery" ? "Sorcery is cast"
+      : type === "Land" ? "Land is played"
+      : type === "Enchantment" ? "Enchantment is cast"
+      : type === "Artifact" ? "Artifact is cast"
+      : type === "Planeswalker" ? "Planeswalker is cast"
+      : "Spell is cast";
+  }
+
   function resetReminderBuilder() {
+    setUbNameSuggestions([]);
     setUbName(""); setUbDescription(""); setUbFireMode("phase");
     setUbPhases([]); setUbTriggerEvent(null); setUbTriggerEventSearch("");
     setUbConditions([]); setUbActivePhases([]); setUbActiveDuring("mine");
@@ -1216,6 +1234,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   }
 
   function openReminderBuilder(existing?: Reminder) {
+    setUbNameSuggestions([]);
     if (existing) {
       setUbName(existing.name);
       setUbDescription(existing.description ?? "");
@@ -1235,11 +1254,12 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
     setReminderBuilderModal(true);
   }
 
-  function openReminderBuilderForEvent(event: string) {
+  function openReminderBuilderForEvent(event: string, cardName?: string) {
     resetReminderBuilder();
     setUbFireMode("event");
     setUbTriggerEvent(event);
     setUbFrequency("each-time");
+    if (cardName && cardName.trim()) setUbName(cardName.trim());
     setReminderBuilderModal(true);
     setEventReminderToggle(false);
   }
@@ -1309,13 +1329,16 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
 
         {/* PHASE LIST TOP BAR */}
         <View style={[s.topBar, { paddingTop: Platform.OS === "android" ? (StatusBar.currentHeight ?? 0) + 10 : 20, paddingBottom: 12 }]}>
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "flex-start", marginBottom: 6 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
             <View>
               <Text style={[s.topPlayerName, { fontSize: 18 }]}>{currentPlayer?.name ?? state.playerName}</Text>
               <Text style={[s.statLabel, { marginTop: 2 }]}>
                 {isOppTurn ? "Opponent's Turn" : "Your Turn"} · Turn {state.turnNumber}
               </Text>
             </View>
+            <TouchableOpacity onPress={() => { setLifeCounterHint(null); setLifeCounterModal(true); }} activeOpacity={0.7}>
+              <Text style={{ color: C.danger, fontSize: 20, fontWeight: "900" }}>{userLife} life</Text>
+            </TouchableOpacity>
           </View>
           {isOppTurn && (
             <View style={{ backgroundColor: "#1A1200", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: "#F59E0B", alignSelf: "flex-start" }}>
@@ -1395,6 +1418,9 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             <Text style={{ color: accentColor, fontSize: 18, fontWeight: "700" }}>‹</Text>
             <Text style={{ color: accentColor, fontSize: 13, fontWeight: "600" }}>Phases</Text>
           </TouchableOpacity>
+          <TouchableOpacity onPress={() => { setLifeCounterHint(null); setLifeCounterModal(true); }} activeOpacity={0.7}>
+            <Text style={{ color: C.danger, fontSize: 18, fontWeight: "900" }}>{userLife} life</Text>
+          </TouchableOpacity>
           <View style={[s.turnBadge, isOppTurn && { backgroundColor: "#1A1200", borderColor: "#F59E0B" }]}>
             <Text style={[s.turnBadgeText, isOppTurn && { color: "#F59E0B" }]}>
               {isOppTurn ? "Opp Turn" : `Turn ${state.turnNumber}`}
@@ -1473,12 +1499,16 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             ) : activeReminders.map(r => (
               <View key={r.id} style={[s.reminderItem, r.status !== "pending" && { opacity: 0.55 }]}>
                 <View style={{ flex: 1 }}>
-                  <Text style={s.reminderTitle}>{r.name}</Text>
+                  <Text style={[s.reminderTitle, r.status === "resolved" && { textDecorationLine: "line-through" as const }]}>{r.name}</Text>
                   {r.description ? <Text style={s.reminderDesc}>{r.description}</Text> : null}
                 </View>
                 {(r.status === "active" || r.status === "pending") && (
                   <View style={{ flexDirection: "row", gap: 6 }}>
-                    <TouchableOpacity style={s.resolveBtn} onPress={() => dispatch({ type: "RESOLVE_REMINDER", id: r.id })}><Text style={s.resolveBtnText}>Resolve</Text></TouchableOpacity>
+                    <TouchableOpacity style={s.resolveBtn} onPress={() => {
+                      dispatch({ type: "RESOLVE_REMINDER", id: r.id });
+                      const hint = getLifeEffectHint(r);
+                      if (hint) { setLifeCounterHint(hint); setLifeCounterModal(true); }
+                    }}><Text style={s.resolveBtnText}>Resolve</Text></TouchableOpacity>
                     <TouchableOpacity style={s.skipBtn} onPress={() => dispatch({ type: "SKIP_REMINDER", id: r.id })}><Text style={s.skipBtnText}>Skip</Text></TouchableOpacity>
                   </View>
                 )}
@@ -1505,14 +1535,14 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
         <View style={{ height: 10 }} />
 
         {/* SPELL LOG PREVIEW */}
-        {state.spellLog.length > 0 && (
+        {state.spellLog.some(sp => sp.type !== "Land") && (
           <>
             <View style={s.card}>
               <View style={s.sectionHead}>
                 <Text style={s.sectionTitle}>Spells Cast</Text>
                 <TouchableOpacity onPress={() => setSpellLogModal(true)}><Text style={{ color: C.accent, fontSize: 12, fontWeight: "700" }}>View All</Text></TouchableOpacity>
               </View>
-              {state.spellLog.filter(sp => sp.zone === "active").slice(-3).reverse().map(sp => {
+              {state.spellLog.filter(sp => sp.zone === "active" && sp.type !== "Land").slice(-3).reverse().map(sp => {
                 const spellOwnerColor = sp.playerId
                   ? (state.players.find(p => p.id === sp.playerId)?.isUser ? C.accent : "#F59E0B")
                   : C.border;
@@ -2587,6 +2617,22 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 <Text style={s.sectionLabel}>Effect Note</Text>
                 <TextInput style={[s.input, { minHeight: 60, textAlignVertical: "top" }]} value={spellEffectNote} onChangeText={setSpellEffectNote} placeholder="What does this card do?" placeholderTextColor={C.dim} multiline />
               </>)}
+              {/* REMINDER TOGGLE */}
+              <TouchableOpacity
+                style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, paddingHorizontal: 2, marginBottom: 4 }}
+                onPress={() => setEventReminderToggle(prev => !prev)}
+                activeOpacity={0.8}
+              >
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <Text style={{ fontSize: 15 }}>🔔</Text>
+                  <Text style={{ color: C.muted, fontSize: 13, fontWeight: "600" }}>Add a Reminder</Text>
+                </View>
+                <View style={[{ width: 44, height: 26, borderRadius: 13, borderWidth: 1.5, justifyContent: "center" },
+                  eventReminderToggle ? { backgroundColor: C.accentDim, borderColor: C.accent } : { backgroundColor: C.cardAlt, borderColor: C.border }]}>
+                  <View style={[{ width: 18, height: 18, borderRadius: 9, marginHorizontal: 2 },
+                    eventReminderToggle ? { backgroundColor: C.accent, alignSelf: "flex-end" } : { backgroundColor: C.dim, alignSelf: "flex-start" }]} />
+                </View>
+              </TouchableOpacity>
             </ScrollView>
             <View style={s.modalBtnRow}>
               <TouchableOpacity style={s.modalCancelBtn} onPress={() => setEditSpellModal(false)}><Text style={s.closeBtnText}>Cancel</Text></TouchableOpacity>
@@ -2612,6 +2658,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                       },
                     });
                     setEditSpellModal(false);
+                    if (eventReminderToggle) openReminderBuilderForEvent(eventForSpellType(editSpellType), editSpellName.trim());
                   }
                 }}>
                 <Text style={s.startBtnText}>Save Changes</Text>
@@ -2870,10 +2917,11 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                     : selectedSpell === "Artifact" ? "Artifact is cast"
                     : selectedSpell === "Planeswalker" ? "Planeswalker is cast"
                     : "Spell is cast";
+                  const castName = spellName.trim() || selectedSpell;
                   setSelectedSpell(null);
                   setSpellName("");
                   resetSpellDetailForm();
-                  if (eventReminderToggle) openReminderBuilderForEvent(spellReminderEvent);
+                  if (eventReminderToggle) openReminderBuilderForEvent(spellReminderEvent, castName);
                 }}>
                 <Text style={s.startBtnText}>Log Spell</Text>
               </TouchableOpacity>
@@ -2965,7 +3013,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                   const detail = creatureName.trim() ? `Creature died: ${creatureName.trim()}` : "Creature died";
                   dispatch({ type: "LOG_EVENT", eventType: "Creature Died", detail });
                   setCreatureModal(false);
-                  if (eventReminderToggle) openReminderBuilderForEvent("Creature dies");
+                  if (eventReminderToggle) openReminderBuilderForEvent("Creature dies", creatureName.trim());
                 }}>
                 <Text style={s.startBtnText}>Log</Text>
               </TouchableOpacity>
@@ -3228,7 +3276,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                     }
                     setTokenPower(""); setTokenToughness("");
                     setTokenModal(false);
-                    if (eventReminderToggle) openReminderBuilderForEvent("Token is created");
+                    if (eventReminderToggle) openReminderBuilderForEvent("Token is created", selectedToken ?? undefined);
                   }
                 }}>
                 <Text style={s.startBtnText}>Confirm</Text>
@@ -3306,7 +3354,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             <View style={s.handle} />
             <Text style={s.sheetTitle}>Other Events</Text>
             {[
-              { icon: "❤️", label: "Gain / Lose Life", onPress: () => { setOthersModal(false); setGainLoseLifeModal(true); } },
+              { icon: "❤️", label: "Gain / Lose Life", onPress: () => { setOthersModal(false); setLifeCounterHint(null); setLifeCounterModal(true); } },
               { icon: "🔍", label: "Tutor / Search", onPress: () => { setOthersModal(false); setTutorModal(true); } },
               { icon: "💨", label: "Mill", onPress: () => { setOthersModal(false); setMillModal(true); } },
               { icon: "⚡", label: "Deal Damage", onPress: () => { setOthersModal(false); setDealDamageModal(true); } },
@@ -3321,62 +3369,6 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             <View style={{ marginTop: 16 }}>
               <TouchableOpacity style={s.closeBtn} onPress={() => setOthersModal(false)}>
                 <Text style={s.closeBtnText}>Close</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* GAIN / LOSE LIFE MODAL */}
-      <Modal visible={gainLoseLifeModal} transparent animationType="slide" onRequestClose={() => setGainLoseLifeModal(false)}>
-        <View style={{ flex: 1, justifyContent: "flex-end" }}>
-          <TouchableOpacity style={s.backdrop} onPress={() => setGainLoseLifeModal(false)} />
-          <View style={s.sheet}>
-            <View style={s.handle} />
-            <Text style={s.sheetTitle}>Gain / Lose Life</Text>
-            <View style={{ flexDirection: "row", gap: 10, marginBottom: 20 }}>
-              <TouchableOpacity
-                style={[{ flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: "center", borderWidth: 1 }, gainLoseMode === "gain" ? { backgroundColor: C.successDim, borderColor: C.success } : { backgroundColor: C.cardAlt, borderColor: C.border }]}
-                onPress={() => setGainLoseMode("gain")}
-              >
-                <Text style={{ color: gainLoseMode === "gain" ? C.success : C.muted, fontWeight: "700" }}>Gain</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[{ flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: "center", borderWidth: 1 }, gainLoseMode === "lose" ? { backgroundColor: C.dangerDim, borderColor: C.danger } : { backgroundColor: C.cardAlt, borderColor: C.border }]}
-                onPress={() => setGainLoseMode("lose")}
-              >
-                <Text style={{ color: gainLoseMode === "lose" ? C.danger : C.muted, fontWeight: "700" }}>Lose</Text>
-              </TouchableOpacity>
-            </View>
-            <View style={s.qtyRow}>
-              <TouchableOpacity style={s.qtyBtn} onPress={() => setGainLoseQty(q => Math.max(1, q - 1))}><Text style={s.lifeBtnText}>−</Text></TouchableOpacity>
-              <Text style={[s.lifeVal, { fontSize: 36 }]}>{gainLoseQty}</Text>
-              <TouchableOpacity style={s.qtyBtn} onPress={() => setGainLoseQty(q => q + 1)}><Text style={s.lifeBtnText}>+</Text></TouchableOpacity>
-            </View>
-              {/* REMINDER TOGGLE */}
-              <TouchableOpacity
-                style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, paddingHorizontal: 2, marginBottom: 4 }}
-                onPress={() => setEventReminderToggle(prev => !prev)}
-                activeOpacity={0.8}
-              >
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                  <Text style={{ fontSize: 15 }}>🔔</Text>
-                  <Text style={{ color: C.muted, fontSize: 13, fontWeight: "600" }}>Add a Reminder</Text>
-                </View>
-                <View style={[{ width: 44, height: 26, borderRadius: 13, borderWidth: 1.5, justifyContent: "center" },
-                  eventReminderToggle ? { backgroundColor: C.accentDim, borderColor: C.accent } : { backgroundColor: C.cardAlt, borderColor: C.border }]}>
-                  <View style={[{ width: 18, height: 18, borderRadius: 9, marginHorizontal: 2 },
-                    eventReminderToggle ? { backgroundColor: C.accent, alignSelf: "flex-end" } : { backgroundColor: C.dim, alignSelf: "flex-start" }]} />
-                </View>
-              </TouchableOpacity>
-            <View style={s.modalBtnRow}>
-              <TouchableOpacity style={s.modalCancelBtn} onPress={() => setGainLoseLifeModal(false)}><Text style={s.closeBtnText}>Cancel</Text></TouchableOpacity>
-              <TouchableOpacity style={s.modalConfirmBtn} onPress={() => {
-                dispatch({ type: "CHANGE_LIFE", delta: gainLoseMode === "gain" ? gainLoseQty : -gainLoseQty, playerId: currentTurnPlayerId });
-                setGainLoseLifeModal(false);
-                if (eventReminderToggle) openReminderBuilderForEvent("Life total changes");
-              }}>
-                <Text style={s.startBtnText}>Confirm</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -3627,18 +3619,23 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                   : fx.effectType === "custom" ? (fx.customText ?? "Custom")
                   : "Log only"
                 ).join(", ");
+                const hint = getLifeEffectHint(r);
+                const canResolve = instance.triggeredByUser || !!hint;
                 return (
                   <View key={instance.id} style={{ backgroundColor: C.cardAlt, borderRadius: 10, borderWidth: 1, borderColor: C.border, padding: 12 }}>
                     <Text style={{ color: C.accent, fontWeight: "700", fontSize: 14, marginBottom: 2 }}>🔔 {r.name}</Text>
                     {r.triggerEvent ? <Text style={{ color: C.muted, fontSize: 12, marginBottom: 4 }}>Event: {r.triggerEvent}</Text> : null}
                     {r.description ? <Text style={{ color: C.dim, fontSize: 11, marginBottom: 6 }}>{r.description}</Text> : null}
-                    {instance.triggeredByUser
+                    {canResolve
                       ? <Text style={{ color: C.text, fontSize: 12, marginBottom: 4 }}>Effect: {effectSummary}</Text>
                       : <Text style={{ color: C.warning, fontSize: 12, marginBottom: 4 }}>⚠️ Opponent's action — effect logged only, no stat change</Text>
                     }
                     <View style={{ flexDirection: "row", gap: 8 }}>
-                      <TouchableOpacity style={[s.actionBtn, { flex: 1, backgroundColor: instance.triggeredByUser ? C.successDim : C.cardAlt, borderColor: instance.triggeredByUser ? C.success : C.border, paddingVertical: 8 }]} onPress={() => dispatch({ type: "RESOLVE_REMINDER_FIRE", fireId: instance.id })}>
-                        <Text style={[s.confirmBtnText, { fontSize: 13 }]}>{instance.triggeredByUser ? "✓ Resolve" : "📋 Log & Dismiss"}</Text>
+                      <TouchableOpacity style={[s.actionBtn, { flex: 1, backgroundColor: canResolve ? C.successDim : C.cardAlt, borderColor: canResolve ? C.success : C.border, paddingVertical: 8 }]} onPress={() => {
+                        dispatch({ type: "RESOLVE_REMINDER_FIRE", fireId: instance.id });
+                        if (hint) { setLifeCounterHint(hint); setLifeCounterModal(true); }
+                      }}>
+                        <Text style={[s.confirmBtnText, { fontSize: 13 }]}>{canResolve ? "✓ Resolve" : "📋 Log & Dismiss"}</Text>
                       </TouchableOpacity>
                       <TouchableOpacity style={[s.actionBtn, { flex: 1, backgroundColor: C.warningDim, borderColor: C.warning, paddingVertical: 8 }]} onPress={() => dispatch({ type: "PARK_REMINDER_FIRE", fireId: instance.id })}>
                         <Text style={[s.confirmBtnText, { fontSize: 13 }]}>⏸ Park</Text>
@@ -3666,7 +3663,30 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
 
               {/* NAME */}
               <Text style={s.sectionLabel}>Name *</Text>
-              <TextInput style={[s.input, { marginBottom: 16 }]} value={ubName} onChangeText={setUbName} placeholder="e.g. Soul Warden, Propaganda, Rhystic Study" placeholderTextColor={C.dim} />
+              <TextInput
+                style={s.input}
+                value={ubName}
+                onChangeText={(text) => {
+                  setUbName(text);
+                  setUbNameSuggestions(searchCardNames(text));
+                }}
+                placeholder="e.g. Soul Warden, Propaganda, Rhystic Study"
+                placeholderTextColor={C.dim}
+              />
+              {ubNameSuggestions.length > 0 && (
+                <View style={{ backgroundColor: C.cardAlt, borderRadius: 10, borderWidth: 1, borderColor: C.border, marginBottom: 12, overflow: "hidden" }}>
+                  {ubNameSuggestions.map((card) => (
+                    <TouchableOpacity
+                      key={card.name}
+                      style={{ paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.border }}
+                      onPress={() => { setUbName(card.name); setUbNameSuggestions([]); }}
+                      activeOpacity={0.75}
+                    >
+                      <Text style={{ color: C.text, fontSize: 13, fontWeight: "600" }}>{card.name}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
 
               {/* FIRE MODE */}
               <Text style={s.sectionLabel}>How does it fire?</Text>
@@ -4027,7 +4047,11 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                   <View style={{ flexDirection: "row", gap: 8, marginTop: 6 }}>
                     <TouchableOpacity
                       style={[s.resolveBtn, { flex: 1, alignItems: "center" }]}
-                      onPress={() => dispatch({ type: "RESOLVE_REMINDER", id: r.id })}
+                      onPress={() => {
+                        dispatch({ type: "RESOLVE_REMINDER", id: r.id });
+                        const hint = getLifeEffectHint(r);
+                        if (hint) { setLifeCounterHint(hint); setLifeCounterModal(true); }
+                      }}
                     >
                       <Text style={s.resolveBtnText}>Resolve</Text>
                     </TouchableOpacity>
@@ -4041,6 +4065,39 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 </View>
               ))}
             </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* LIFE MODAL */}
+      <Modal visible={lifeCounterModal} transparent animationType="slide" onRequestClose={() => { setLifeCounterModal(false); setLifeCounterHint(null); }}>
+        <View style={{ flex: 1, justifyContent: "flex-end" }}>
+          <TouchableOpacity style={s.backdrop} onPress={() => { setLifeCounterModal(false); setLifeCounterHint(null); }} />
+          <View style={[s.sheet, { maxHeight: "85%", flex: 1 }]}>
+            <View style={s.handle} />
+            <Text style={s.sheetTitle}>Life</Text>
+            {lifeCounterHint && (
+              <View style={{ backgroundColor: C.accentDim, borderRadius: 8, padding: 10, marginBottom: 12, borderWidth: 1, borderColor: C.accent }}>
+                <Text style={{ color: C.accent, fontSize: 12, fontWeight: "700" }}>{lifeCounterHint}</Text>
+              </View>
+            )}
+            <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+              {state.players.map(p => (
+                <View key={p.id} style={s.manaRow}>
+                  <Text style={[s.manaLabel]}>{p.name}{p.isUser ? " (You)" : ""}</Text>
+                  <Text style={s.manaTotal}>{p.life}</Text>
+                  <TouchableOpacity style={s.manaBtn} onPress={() => dispatch({ type: "CHANGE_LIFE", delta: -1, playerId: p.id })}>
+                    <Text style={s.manaBtnText}>−</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={s.manaBtn} onPress={() => dispatch({ type: "CHANGE_LIFE", delta: 1, playerId: p.id })}>
+                    <Text style={s.manaBtnText}>+</Text>
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </ScrollView>
+            <TouchableOpacity style={[s.closeBtn, { marginTop: 8 }]} onPress={() => { setLifeCounterModal(false); setLifeCounterHint(null); }}>
+              <Text style={s.closeBtnText}>Close</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
