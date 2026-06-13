@@ -17,7 +17,7 @@ import {
 } from "../../System/reminderSystem";
 import { searchCardNames, CardNameRecord } from "../../System/cardSearchSystem";
 import { C } from "../../lib/types";
-import type { HistoryEntry, CastSpell, GraveyardEntry, ExileEntry, TokenGYEntry, ManaPool, Player, GameState, Action } from "../../lib/types";
+import type { HistoryEntry, CastSpell, GraveyardEntry, ExileEntry, TokenGYEntry, ManaPool, Player, GameState, Action, CreatureCounterType } from "../../lib/types";
 import BattlefieldModal from "../../components/BattlefieldModal";
 
 const PHASES = [
@@ -33,6 +33,8 @@ const COMMON_TOKENS = [
   "Warrior", "Vampire", "Wolf", "Bird", "Cat", "Human", "Insect", "Merfolk",
   "Saproling", "Servo", "Thopter", "Food", "Clue", "Blood", "Map",
 ];
+
+const CREATURE_COUNTER_TYPES: CreatureCounterType[] = ["+1/+0", "+0/+1", "+1/+1", "-1/-0", "-0/-1", "-1/-1"];
 
 const SPELL_TYPES = [
   { key: "Creature", icon: "🐉" },
@@ -934,6 +936,11 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [landModal, setLandModal] = useState(false);
   const [tokenModal, setTokenModal] = useState(false);
   const [genericEvent, setGenericEvent] = useState<string | null>(null);
+  const [counterModal, setCounterModal] = useState(false);
+  const [counterTargetId, setCounterTargetId] = useState<string | null>(null);
+  const [counterType, setCounterType] = useState<CreatureCounterType>("+1/+1");
+  const [counterHint, setCounterHint] = useState<string | null>(null);
+  const [counterAmount, setCounterAmount] = useState(1);
   const [drawQty, setDrawQty] = useState(0);
   const [discardQty, setDiscardQty] = useState(0);
   const [landQty, setLandQty] = useState(1);
@@ -1042,6 +1049,10 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
         sp.turnNumber === state.turnNumber
       ).length
     : state.landsPlayed;
+  const activeCreatures = state.spellLog.filter(sp =>
+    sp.zone === "active" &&
+    (sp.type === "Creature" || (sp.type === "Token" && sp.tokenCategory === "creature"))
+  );
   const accentColor = isOppTurn ? "#F59E0B" : C.accent;
   const accentDimColor = isOppTurn ? "#1A1200" : C.accentDim;
   const [confirmedOppPhases, setConfirmedOppPhases] = useState<string[]>([]);
@@ -1105,13 +1116,13 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
     const anyOpen =
       spellModal || spellDetailModal || drawModal || creatureModal ||
       landModal || tokenModal || addManaModal || othersModal ||
-      genericEvent !== null;
+      counterModal || genericEvent !== null;
     if (!anyOpen) {
       hubOwnerRef.current = null;
       dispatch({ type: "RESET_EVENT_OWNER" });
     }
   }, [spellModal, spellDetailModal, drawModal, creatureModal, landModal,
-      tokenModal, addManaModal, othersModal, genericEvent]);
+      tokenModal, addManaModal, othersModal, counterModal, genericEvent]);
 
   useEffect(() => {
     const prevPhaseView = prevActivePhaseViewRef.current;
@@ -1182,6 +1193,44 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
     if (!fx) return null;
     const sign = fx.effectType === "gain-life" ? "+" : "−";
     return `${r.name} — suggested ${sign}${fx.amount ?? 1} life`;
+  }
+
+  function getCounterEffectHint(r: Reminder): { hint: string; counterType: CreatureCounterType; amount: number } | null {
+    const fx = r.effects.find(e => e.timing === "immediate" && e.effectType === "add-counter");
+    if (!fx) return null;
+
+    const allowedTypes: CreatureCounterType[] = ["+1/+0", "+0/+1", "+1/+1", "-1/-0", "-0/-1", "-1/-1"];
+    const chosenType = allowedTypes.includes(fx.counterType as CreatureCounterType)
+      ? fx.counterType as CreatureCounterType
+      : "+1/+1";
+
+    return {
+      hint: `${r.name} — add ${fx.amount ?? 1} ${chosenType} counter${(fx.amount ?? 1) === 1 ? "" : "s"}`,
+      counterType: chosenType,
+      amount: fx.amount ?? 1,
+    };
+  }
+
+  function openCounterModalForHint(effectHint: { hint: string; counterType: CreatureCounterType; amount: number }) {
+    setCounterHint(effectHint.hint);
+    setCounterType(effectHint.counterType);
+    setCounterAmount(effectHint.amount);
+    setCounterTargetId(null);
+    setCounterModal(true);
+  }
+
+  function openPostResolveEffectModal(r: Reminder) {
+    const lifeHint = getLifeEffectHint(r);
+    if (lifeHint) {
+      setLifeCounterHint(lifeHint);
+      setLifeCounterModal(true);
+      return;
+    }
+
+    const counterEffectHint = getCounterEffectHint(r);
+    if (counterEffectHint) {
+      openCounterModalForHint(counterEffectHint);
+    }
   }
 
   function eventForSpellType(type: string | null): string {
@@ -1289,7 +1338,24 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
     else if (id === "token-created") { setTokenSearch(""); setSelectedToken(null); setTokenQty(1); setTokenModal(true); }
     else if (id === "add-mana") { setManaEventAmounts({ white: 0, blue: 0, black: 0, red: 0, green: 0, colorless: 0 }); setAddManaModal(true); }
     else if (id === "others") { setOthersModal(true); }
+    else if (id === "counter-added") { setCounterModal(true); }
     else { setGenericNote(""); setGenericEvent(id); }
+  }
+
+  function closeCounterModal() {
+    setCounterModal(false);
+    setCounterTargetId(null);
+    setCounterType("+1/+1");
+    setCounterHint(null);
+    setCounterAmount(1);
+  }
+
+  function getCurrentCreaturePT(creature: CastSpell) {
+    if (creature.power === undefined || creature.toughness === undefined) return null;
+    const counters = creature.counters ?? {};
+    const power = creature.power + (counters["+1/+0"] ?? 0) + (counters["+1/+1"] ?? 0) - (counters["-1/-0"] ?? 0) - (counters["-1/-1"] ?? 0);
+    const toughness = creature.toughness + (counters["+0/+1"] ?? 0) + (counters["+1/+1"] ?? 0) - (counters["-0/-1"] ?? 0) - (counters["-1/-1"] ?? 0);
+    return `${power}/${toughness}`;
   }
 
   const typeIcons: Record<string, string> = { Creature: "🐉", Instant: "⚡", Sorcery: "🌀", Enchantment: "✨", Artifact: "⚙️", Planeswalker: "👁️", Battle: "⚔️", Token: "◈", Other: "★" };
@@ -1480,8 +1546,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                   <View style={{ flexDirection: "row", gap: 6 }}>
                     <TouchableOpacity style={s.resolveBtn} onPress={() => {
                       dispatch({ type: "RESOLVE_REMINDER", id: r.id });
-                      const hint = getLifeEffectHint(r);
-                      if (hint) { setLifeCounterHint(hint); setLifeCounterModal(true); }
+                      openPostResolveEffectModal(r);
                     }}><Text style={s.resolveBtnText}>Resolve</Text></TouchableOpacity>
                     <TouchableOpacity style={s.skipBtn} onPress={() => dispatch({ type: "SKIP_REMINDER", id: r.id })}><Text style={s.skipBtnText}>Skip</Text></TouchableOpacity>
                   </View>
@@ -1842,6 +1907,90 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             <TouchableOpacity style={[s.closeBtn, { marginTop: 8 }]} onPress={() => setHubEventsModal(false)}>
               <Text style={s.closeBtnText}>Cancel</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* QUICK COUNTER MODAL */}
+      <Modal visible={counterModal} transparent animationType="slide" onRequestClose={closeCounterModal}>
+        <View style={{ flex: 1, justifyContent: "flex-end" }}>
+          <TouchableOpacity style={s.backdrop} onPress={closeCounterModal} />
+          <View style={[s.sheet, { maxHeight: "82%", flex: 1 }]}>
+            <View style={s.handle} />
+            <Text style={s.sheetTitle}>Counters</Text>
+
+            {counterHint && (
+              <View style={{ backgroundColor: C.accentDim, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: C.accent, marginBottom: 14 }}>
+                <Text style={{ color: C.accent, fontSize: 13, fontWeight: "700" }}>{counterHint}</Text>
+              </View>
+            )}
+
+            {activeCreatures.length === 0 ? (
+              <Text style={[s.reminderDesc, { marginBottom: 16 }]}>No active creatures.</Text>
+            ) : (
+              <>
+                <Text style={s.sectionLabel}>Active Creature</Text>
+                <ScrollView style={{ maxHeight: 260, marginBottom: 16, borderRadius: 12, borderWidth: 1, borderColor: C.border }} showsVerticalScrollIndicator={false}>
+                  {activeCreatures.map(creature => {
+                    const selected = counterTargetId === creature.id;
+                    const owner = creature.playerId ? state.players.find(p => p.id === creature.playerId) : null;
+                    const currentPT = getCurrentCreaturePT(creature);
+                    return (
+                      <TouchableOpacity
+                        key={creature.id}
+                        style={[s.gyRow, selected && { backgroundColor: C.accentDim }]}
+                        onPress={() => setCounterTargetId(creature.id)}
+                        activeOpacity={0.75}
+                      >
+                        <View style={{ flex: 1 }}>
+                          <Text style={[s.reminderTitle, selected && { color: C.accent }]}>{creature.name}</Text>
+                          <Text style={s.reminderDesc}>
+                            {[currentPT ? `${currentPT}` : null, owner?.name ?? creature.playerId ?? null].filter(Boolean).join(" · ")}
+                          </Text>
+                        </View>
+                        {selected && <Text style={{ color: C.accent, fontSize: 16 }}>✓</Text>}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+
+                <Text style={s.sectionLabel}>Counter Type</Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+                  {CREATURE_COUNTER_TYPES.map(ct => (
+                    <TouchableOpacity
+                      key={ct}
+                      style={[{ width: "31%", paddingVertical: 11, borderRadius: 10, alignItems: "center", borderWidth: 1 }, counterType === ct ? { backgroundColor: C.accentDim, borderColor: C.accent } : { backgroundColor: C.cardAlt, borderColor: C.border }]}
+                      onPress={() => setCounterType(ct)}
+                      activeOpacity={0.75}
+                    >
+                      <Text style={{ color: counterType === ct ? C.accent : C.muted, fontWeight: "800" }}>{ct}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </>
+            )}
+
+            <View style={s.modalBtnRow}>
+              <TouchableOpacity style={s.modalCancelBtn} onPress={closeCounterModal}><Text style={s.closeBtnText}>Close</Text></TouchableOpacity>
+              <TouchableOpacity
+                style={[s.modalConfirmBtn, { backgroundColor: C.dangerDim, borderWidth: 1, borderColor: C.danger }, !counterTargetId && { opacity: 0.4 }]}
+                disabled={!counterTargetId}
+                onPress={() => {
+                  if (counterTargetId) dispatch({ type: "CHANGE_CREATURE_COUNTER", spellId: counterTargetId, counterType, delta: -1 });
+                }}
+              >
+                <Text style={s.startBtnText}>Remove</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.modalConfirmBtn, !counterTargetId && { opacity: 0.4 }]}
+                disabled={!counterTargetId}
+                onPress={() => {
+                  if (counterTargetId) dispatch({ type: "CHANGE_CREATURE_COUNTER", spellId: counterTargetId, counterType, delta: counterAmount });
+                }}
+              >
+                <Text style={s.startBtnText}>Add</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -3594,7 +3743,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                   : "Log only"
                 ).join(", ");
                 const hint = getLifeEffectHint(r);
-                const canResolve = instance.triggeredByUser || !!hint;
+                const counterEffectHint = getCounterEffectHint(r);
+                const canResolve = instance.triggeredByUser || !!hint || !!counterEffectHint;
                 return (
                   <View key={instance.id} style={{ backgroundColor: C.cardAlt, borderRadius: 10, borderWidth: 1, borderColor: C.border, padding: 12 }}>
                     <Text style={{ color: C.accent, fontWeight: "700", fontSize: 14, marginBottom: 2 }}>🔔 {r.name}</Text>
@@ -3607,7 +3757,12 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                     <View style={{ flexDirection: "row", gap: 8 }}>
                       <TouchableOpacity style={[s.actionBtn, { flex: 1, backgroundColor: canResolve ? C.successDim : C.cardAlt, borderColor: canResolve ? C.success : C.border, paddingVertical: 8 }]} onPress={() => {
                         dispatch({ type: "RESOLVE_REMINDER_FIRE", fireId: instance.id });
-                        if (hint) { setLifeCounterHint(hint); setLifeCounterModal(true); }
+                        if (hint) {
+                          setLifeCounterHint(hint);
+                          setLifeCounterModal(true);
+                        } else if (counterEffectHint) {
+                          openCounterModalForHint(counterEffectHint);
+                        }
                       }}>
                         <Text style={[s.confirmBtnText, { fontSize: 13 }]}>{canResolve ? "✓ Resolve" : "📋 Log & Dismiss"}</Text>
                       </TouchableOpacity>
@@ -4023,8 +4178,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                       style={[s.resolveBtn, { flex: 1, alignItems: "center" }]}
                       onPress={() => {
                         dispatch({ type: "RESOLVE_REMINDER", id: r.id });
-                        const hint = getLifeEffectHint(r);
-                        if (hint) { setLifeCounterHint(hint); setLifeCounterModal(true); }
+                        openPostResolveEffectModal(r);
                       }}
                     >
                       <Text style={s.resolveBtnText}>Resolve</Text>
