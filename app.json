@@ -23,7 +23,8 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.gbaby4life.mtgphasereminder"
+      "package": "com.gbaby4life.mtgphasereminder",
+      "softwareKeyboardLayoutMode": "pan"
     },
     "web": {
       "bundler": "metro",

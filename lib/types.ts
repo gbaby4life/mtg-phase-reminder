@@ -19,6 +19,10 @@ export type HistoryEntry = {
 
 export type CreatureCounterType = "+1/+0" | "+0/+1" | "+1/+1" | "-1/-0" | "-0/-1" | "-1/-1";
 
+export type ResourceTokenKind = "Treasure" | "Food" | "Clue" | "Blood" | "Map" | "Powerstone" | "generic";
+export type ResourceTokenIntent = "use" | "sacrifice" | "destroy" | "delete";
+export type ResourceTokenMapResult = "land" | "nonland" | "unknown";
+
 export type ManaCost = {
   generic: number;
   white: number;
@@ -28,7 +32,17 @@ export type ManaCost = {
   green: number;
 };
 
+export const MANA_COLOR_ICONS = {
+  white: "☀️",
+  blue: "💧",
+  black: "💀",
+  red: "🔥",
+  green: "🌲",
+  colorless: "⚪",
+} as const;
+
 const manaCostKeys: (keyof ManaCost)[] = ["generic", "white", "blue", "black", "red", "green"];
+type IconManaCost = Partial<ManaCost> & { colorless?: number };
 
 function cleanManaAmount(value: number | undefined): number {
   return Number.isFinite(value) ? Math.max(0, Math.floor(value ?? 0)) : 0;
@@ -67,6 +81,47 @@ export function formatManaCostLabel(cost?: Partial<ManaCost> | null, fallbackMan
   });
 
   return parts.join(" + ");
+}
+
+function hasIconManaCost(cost?: IconManaCost | null): boolean {
+  return hasManaCost(cost) || cleanManaAmount(cost?.colorless) > 0;
+}
+
+function repeatManaIcon(icon: string, amount: number): string {
+  return Array.from({ length: amount }, () => icon).join("");
+}
+
+export function formatManaCostSymbols(cost?: IconManaCost | null, fallbackManaValue?: number): string {
+  if (!hasIconManaCost(cost)) {
+    return fallbackManaValue !== undefined ? String(cleanManaAmount(fallbackManaValue)) : "None";
+  }
+
+  const generic = cleanManaAmount(cost?.generic);
+  const symbols = [
+    repeatManaIcon(MANA_COLOR_ICONS.white, cleanManaAmount(cost?.white)),
+    repeatManaIcon(MANA_COLOR_ICONS.blue, cleanManaAmount(cost?.blue)),
+    repeatManaIcon(MANA_COLOR_ICONS.black, cleanManaAmount(cost?.black)),
+    repeatManaIcon(MANA_COLOR_ICONS.red, cleanManaAmount(cost?.red)),
+    repeatManaIcon(MANA_COLOR_ICONS.green, cleanManaAmount(cost?.green)),
+    repeatManaIcon(MANA_COLOR_ICONS.colorless, cleanManaAmount(cost?.colorless)),
+  ].join("");
+
+  if (generic > 0 && symbols) return `${generic}+${symbols}`;
+  if (generic > 0) return String(generic);
+  return symbols || "None";
+}
+
+export function formatManaCostSymbolsWithTax(cost?: IconManaCost | null, commanderTax = 0, fallbackManaValue?: number): string {
+  const tax = cleanManaAmount(commanderTax);
+  if (!hasIconManaCost(cost)) {
+    if (fallbackManaValue !== undefined) return String(cleanManaAmount(fallbackManaValue) + tax);
+    return "None";
+  }
+
+  return formatManaCostSymbols({
+    ...cost,
+    generic: cleanManaAmount(cost?.generic) + tax,
+  });
 }
 
 export type CastSpell = {
@@ -155,7 +210,7 @@ export type ExileEntry = {
 export type TokenGYEntry = {
   id: string; name: string;
   tokenCategory: "creature" | "resource";
-  action: "died" | "sacrificed" | "cracked";
+  action: "died" | "sacrificed" | "cracked" | "destroyed";
   turnNumber: number; phase: string; timestamp: number;
   playerId?: string;
 };
@@ -280,4 +335,6 @@ export type Action =
   | { type: "ASSIGN_BLOCKER"; blockerId: string; attackerId: string }
   | { type: "REMOVE_BLOCKER"; blockerId: string }
   | { type: "CLEAR_COMBAT" }
-  | { type: "CHANGE_CREATURE_COUNTER"; spellId: string; counterType: CreatureCounterType; delta: number };
+  | { type: "CHANGE_CREATURE_COUNTER"; spellId: string; counterType: CreatureCounterType; delta: number }
+  | { type: "RESOLVE_RESOURCE_TOKEN"; spellId: string; intent: ResourceTokenIntent; manaColor?: keyof ManaPool; mapTargetSpellId?: string; mapResult?: ResourceTokenMapResult }
+  | { type: "CREATURE_TOKEN_EXIT"; spellId: string; reason: "died" | "sacrificed" | "destroyed" | "delete" };

@@ -2,7 +2,7 @@
 import {
   View, Text, TouchableOpacity, ScrollView, Modal,
   TextInput, StyleSheet, Platform,
-  KeyboardAvoidingView, StatusBar, Animated,
+  KeyboardAvoidingView, StatusBar, Animated, Keyboard,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import {
@@ -16,9 +16,10 @@ import {
   resetEventReminderTurnFlags, deactivateRemindersForSpell,
 } from "../../System/reminderSystem";
 import { searchCardNames, CardNameRecord } from "../../System/cardSearchSystem";
-import { C, emptyManaCost, formatManaCostLabel, getManaCostValue, hasManaCost } from "../../lib/types";
+import { C, MANA_COLOR_ICONS, emptyManaCost, formatManaCostLabel, getManaCostValue, hasManaCost } from "../../lib/types";
 import type { HistoryEntry, CastSpell, GraveyardEntry, ExileEntry, TokenGYEntry, ManaPool, Player, GameState, Action, CreatureCounterType, ManaCost, CommanderRecord } from "../../lib/types";
 import BattlefieldModal from "../../components/BattlefieldModal";
+import { resolveResourceToken, getResourceTokenKind, getResourceTokenCompactText } from "../../System/resourceTokenSystem";
 
 const PHASES = [
   "Untap", "Upkeep", "Draw", "Main Phase 1",
@@ -31,7 +32,7 @@ const PINNED_TOKENS = ["Treasure", "1/1 Soldier", "1/1 Goblin"];
 const COMMON_TOKENS = [
   "Zombie", "Knight", "Beast", "Dragon", "Angel", "Elemental", "Spirit",
   "Warrior", "Vampire", "Wolf", "Bird", "Cat", "Human", "Insect", "Merfolk",
-  "Saproling", "Servo", "Thopter", "Food", "Clue", "Blood", "Map",
+  "Saproling", "Servo", "Thopter", "Food", "Clue", "Blood", "Map", "Powerstone",
 ];
 
 const CREATURE_COUNTER_TYPES: CreatureCounterType[] = ["+1/+0", "+0/+1", "+1/+1", "-1/-0", "-0/-1", "-1/-1"];
@@ -57,15 +58,15 @@ const SPELL_TYPES = [
 ];
 
 const MANA_COLORS = [
-  { key: "white", label: "White", emoji: "☀️" },
-  { key: "blue", label: "Blue", emoji: "💧" },
-  { key: "black", label: "Black", emoji: "💀" },
-  { key: "red", label: "Red", emoji: "🔥" },
-  { key: "green", label: "Green", emoji: "🌲" },
-  { key: "colorless", label: "Colorless", emoji: "⚪" },
+  { key: "white", label: "White", emoji: MANA_COLOR_ICONS.white },
+  { key: "blue", label: "Blue", emoji: MANA_COLOR_ICONS.blue },
+  { key: "black", label: "Black", emoji: MANA_COLOR_ICONS.black },
+  { key: "red", label: "Red", emoji: MANA_COLOR_ICONS.red },
+  { key: "green", label: "Green", emoji: MANA_COLOR_ICONS.green },
+  { key: "colorless", label: "Colorless", emoji: MANA_COLOR_ICONS.colorless },
 ] as const;
 
-const RESOURCE_TOKENS = ["Treasure", "Food", "Clue", "Blood", "Map"];
+const RESOURCE_TOKENS = ["Treasure", "Food", "Clue", "Blood", "Map", "Powerstone"];
 
 const RAINBOW_COLORS = [
   '#FF0000', '#FF7700', '#FFFF00', '#00FF00',
@@ -1060,6 +1061,37 @@ function reducer(state: GameState, action: Action): GameState {
       const entry = logEntry(state, `${sp.name}: ${action.counterType} counter ${sign}${action.delta}`, sp.playerId);
       return { ...state, spellLog, history: [...state.history, entry] };
     }
+    case "RESOLVE_RESOURCE_TOKEN": {
+      return resolveResourceToken(state, action, { phase: PHASES[state.phaseIndex] });
+    }
+    case "CREATURE_TOKEN_EXIT": {
+      const sp = state.spellLog.find(x => x.id === action.spellId);
+      if (!sp) return state;
+      if (action.reason === "delete") {
+        const entry = logEntry(state, `${sp.name} deleted.`, sp.playerId);
+        return { ...state, spellLog: state.spellLog.filter(x => x.id !== action.spellId), history: [...state.history, entry] };
+      }
+      const currentPhase = PHASES[state.phaseIndex];
+      const tgyEntry: TokenGYEntry = {
+        id: `tgy-${Date.now()}-${Math.random()}`,
+        name: sp.name,
+        tokenCategory: "creature",
+        action: action.reason,
+        turnNumber: state.turnNumber,
+        phase: currentPhase,
+        timestamp: Date.now(),
+        playerId: sp.playerId,
+      };
+      const logMsgs: Record<string, string> = { died: `${sp.name} died.`, sacrificed: `${sp.name} sacrificed.`, destroyed: `${sp.name} destroyed.` };
+      const entry = logEntry(state, logMsgs[action.reason] ?? `${sp.name} ${action.reason}.`, sp.playerId);
+      const exitEventsMap: Record<string, string[]> = {
+        died: ["Token dies", "Creature dies"],
+        sacrificed: ["Token is sacrificed", "Creature is sacrificed"],
+        destroyed: ["Token dies", "Creature dies"],
+      };
+      const { reminders, pendingReminderFires } = fireMatchingEvents(state, state.reminders, state.pendingReminderFires, exitEventsMap[action.reason] ?? []);
+      return { ...state, spellLog: state.spellLog.filter(x => x.id !== action.spellId), tokenGY: [...state.tokenGY, tgyEntry], reminders, pendingReminderFires, history: [...state.history, entry] };
+    }
     default: return state;
   }
 }
@@ -1124,12 +1156,33 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
   const [commanderForms, setCommanderForms] = useState<CommanderSetupForm[]>(() => [makeCommanderSetupForm(0), makeCommanderSetupForm(1)]);
   const [activeCommanderSearchIndex, setActiveCommanderSearchIndex] = useState<number | null>(null);
   const [commanderNameSuggestions, setCommanderNameSuggestions] = useState<CardNameRecord[]>([]);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
 
   const gameTypes = [
     { key: "commander", label: "Commander", life: 40, desc: "40 life, EDH format" },
     { key: "standard", label: "Standard", life: 20, desc: "20 life, 1v1" },
     { key: "custom", label: "Custom", life: 20, desc: "Set your own rules" },
   ];
+  const activeCommanderForms = commanderForms.slice(0, playerCount);
+  const missingCommanderNames = gameType === "commander"
+    ? activeCommanderForms
+        .filter(form => form.name.trim().length === 0)
+        .map(form => playerNames[form.playerIndex]?.trim() || `Player ${form.playerIndex + 1}`)
+    : [];
+  const commandersComplete = missingCommanderNames.length === 0;
+  const canStartGame = gameType !== "commander" || commandersComplete;
+  const setupKeyboardPadding = keyboardOpen
+    ? Platform.OS === "android" ? 96 : 120
+    : undefined;
+
+  useEffect(() => {
+    const showSub = Keyboard.addListener("keyboardDidShow", () => setKeyboardOpen(true));
+    const hideSub = Keyboard.addListener("keyboardDidHide", () => setKeyboardOpen(false));
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   function handlePlayerCountChange(count: number) {
     setPlayerCount(count);
@@ -1214,6 +1267,7 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
   }
 
   function handleStartGame() {
+    if (!canStartGame) return;
     const players: Player[] = playerNames.map((name, i) => ({
       id: `p${i + 1}`, name: name.trim() || `Player ${i + 1}`,
       isUser: i === 0, life,
@@ -1259,7 +1313,15 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
   return (
     <SafeAreaView style={s.safe}>
       <StatusBar barStyle="light-content" backgroundColor={C.bg} />
-      <ScrollView contentContainerStyle={s.setupContainer} keyboardShouldPersistTaps="handled">
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 24 : 0}
+      >
+      <ScrollView
+        contentContainerStyle={[s.setupContainer, setupKeyboardPadding !== undefined && { paddingBottom: setupKeyboardPadding }]}
+        keyboardShouldPersistTaps="handled"
+      >
         <View style={s.setupTopRow}>
           <TouchableOpacity onPress={() => step > 1 ? setStep(step - 1) : dispatch({ type: "GO_MENU" })}>
             <Text style={s.backBtn}>← Back</Text>
@@ -1344,9 +1406,9 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
             </View>
             {gameType === "commander" && (
               <View style={{ marginTop: 12, marginBottom: 8 }}>
-                <Text style={s.sectionLabel}>Commanders</Text>
-                <Text style={[s.reminderDesc, { marginBottom: 12 }]}>Optional: filled commanders start in the command zone.</Text>
-                {commanderForms.slice(0, playerCount).map(form => (
+                <Text style={s.sectionLabel}>Commander Required</Text>
+                <Text style={[s.reminderDesc, { marginBottom: 12 }]}>Enter a commander for each player before starting a Commander game. Each player's commander starts in the command zone.</Text>
+                {activeCommanderForms.map(form => (
                   <View key={form.playerIndex} style={{ backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 12, padding: 12, marginBottom: 12 }}>
                     <Text style={[s.gameTypeLabel, { marginBottom: 4 }]}>{playerNames[form.playerIndex]?.trim() || `Player ${form.playerIndex + 1}`}</Text>
                     <Text style={[s.gameTypeDesc, { marginBottom: 6 }]}>Commander Name</Text>
@@ -1358,7 +1420,7 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
                         setCommanderNameSuggestions(searchCardNames(form.name));
                       }}
                       onChangeText={text => handleCommanderNameChange(form.playerIndex, text)}
-                      placeholder="Optional commander name"
+                      placeholder="Commander name"
                       placeholderTextColor={C.dim}
                       maxLength={40}
                     />
@@ -1387,14 +1449,20 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
                     </View>
                   </View>
                 ))}
+                {!commandersComplete && (
+                  <Text style={[s.reminderDesc, { color: C.warning, marginTop: 2 }]}>
+                    Missing commander: {missingCommanderNames.join(", ")}
+                  </Text>
+                )}
               </View>
             )}
-            <TouchableOpacity style={s.startBtn} onPress={handleStartGame}>
+            <TouchableOpacity style={[s.startBtn, !canStartGame && { opacity: 0.45 }]} onPress={handleStartGame} disabled={!canStartGame}>
               <Text style={s.startBtnText}>⚔️  Start Game</Text>
             </TouchableOpacity>
           </>
         )}
       </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -1440,6 +1508,10 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
   const [editSpellType, setEditSpellType] = useState<string | null>(null);
   const [manaModal, setManaModal] = useState(false);
   const [treasureColorModal, setTreasureColorModal] = useState(false);
+  const [mapModal, setMapModal] = useState(false);
+  const [mapSpellId, setMapSpellId] = useState<string | null>(null);
+  const [mapResult, setMapResult] = useState<"land" | "nonland" | "unknown" | null>(null);
+  const [mapTargetId, setMapTargetId] = useState<string | null>(null);
   const [gyModal, setGyModal] = useState(false);
   const [gyTab, setGyTab] = useState<"graveyard" | "exile">("graveyard");
   const [gyPlayerFilter, setGyPlayerFilter] = useState<string>("all");
@@ -2189,32 +2261,93 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
 
         <View style={{ height: 10 }} />
 
-        {/* SPELL LOG PREVIEW */}
-        {state.spellLog.some(sp => sp.type !== "Land") && (
-          <>
-            <View style={s.card}>
-              <View style={s.sectionHead}>
-                <Text style={s.sectionTitle}>Spells Cast</Text>
-                <TouchableOpacity onPress={() => setSpellLogModal(true)}><Text style={{ color: C.accent, fontSize: 12, fontWeight: "700" }}>View All</Text></TouchableOpacity>
+        {/* BATTLEFIELD PREVIEW */}
+        {(() => {
+          const activePerm = state.spellLog.filter(sp => sp.zone === "active");
+          const bfCreatures = activePerm.filter(sp => sp.type === "Creature" && !sp.isToken);
+          const bfTokens = activePerm.filter(sp => sp.isToken || sp.type === "Token");
+          const bfOther = activePerm.filter(sp =>
+            !sp.isToken && sp.type !== "Token" && sp.type !== "Creature" &&
+            sp.type !== "Instant" && sp.type !== "Sorcery"
+          );
+          const hasAnything = bfCreatures.length > 0 || bfTokens.length > 0 || bfOther.length > 0;
+
+          const renderBFRow = (sp: (typeof activePerm)[0]) => {
+            const ownerColor = sp.playerId
+              ? (state.players.find(p => p.id === sp.playerId)?.isUser ? C.accent : "#F59E0B")
+              : C.border;
+            const pt = (sp.power !== undefined && sp.toughness !== undefined) ? `${sp.power}/${sp.toughness}` : null;
+            const resourceLabel = sp.isToken && sp.tokenCategory === "resource"
+              ? getResourceTokenCompactText(getResourceTokenKind(sp.name))
+              : null;
+            const badges: string[] = [];
+            if (sp.tapped) badges.push("TAPPED");
+            if (sp.attacking) badges.push("ATK");
+            if (sp.isCommander) badges.push("CDR");
+            const ownerName = state.players.length > 1 && sp.playerId
+              ? state.players.find(p => p.id === sp.playerId)?.name ?? null
+              : null;
+            const meta = [
+              sp.isToken ? (sp.tokenCategory === "resource" ? "Resource Token" : sp.tokenCategory === "creature" ? "Creature Token" : "Token") : sp.type,
+              pt,
+              resourceLabel,
+              ownerName,
+              ...badges,
+            ].filter(Boolean).join(" · ");
+            return (
+              <TouchableOpacity
+                key={sp.id}
+                style={[s.reminderItem, { borderLeftWidth: 3, borderLeftColor: ownerColor }]}
+                onPress={() => { setActiveSpell(sp); setSpellActionModal(true); }}
+                activeOpacity={0.75}
+              >
+                <Text style={{ fontSize: 16 }}>{typeIcons[sp.type] ?? "◈"}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.reminderTitle}>{sp.name}</Text>
+                  <Text style={s.reminderDesc}>{meta}</Text>
+                </View>
+              </TouchableOpacity>
+            );
+          };
+
+          return (
+            <>
+              <View style={s.card}>
+                <View style={s.sectionHead}>
+                  <Text style={s.sectionTitle}>Battlefield Preview</Text>
+                  <TouchableOpacity onPress={() => setBattlefieldModal(true)}>
+                    <Text style={{ color: C.accent, fontSize: 12, fontWeight: "700" }}>BF</Text>
+                  </TouchableOpacity>
+                </View>
+                {!hasAnything ? (
+                  <Text style={{ color: C.dim, fontSize: 12, paddingHorizontal: 14, paddingVertical: 10 }}>No permanents or tokens on the battlefield.</Text>
+                ) : (
+                  <ScrollView nestedScrollEnabled style={{ maxHeight: 260 }} showsVerticalScrollIndicator={false}>
+                    {bfCreatures.length > 0 && (
+                      <>
+                        <Text style={[s.sectionLabel, { paddingTop: 8, paddingHorizontal: 14, marginBottom: 4 }]}>Creatures</Text>
+                        {bfCreatures.map(renderBFRow)}
+                      </>
+                    )}
+                    {bfTokens.length > 0 && (
+                      <>
+                        <Text style={[s.sectionLabel, { paddingTop: bfCreatures.length > 0 ? 8 : 4, paddingHorizontal: 14, marginBottom: 4 }]}>Tokens</Text>
+                        {bfTokens.map(renderBFRow)}
+                      </>
+                    )}
+                    {bfOther.length > 0 && (
+                      <>
+                        <Text style={[s.sectionLabel, { paddingTop: (bfCreatures.length > 0 || bfTokens.length > 0) ? 8 : 4, paddingHorizontal: 14, marginBottom: 4 }]}>Other Permanents</Text>
+                        {bfOther.map(renderBFRow)}
+                      </>
+                    )}
+                  </ScrollView>
+                )}
               </View>
-              {state.spellLog.filter(sp => sp.zone === "active" && sp.type !== "Land").slice(-3).reverse().map(sp => {
-                const spellOwnerColor = sp.playerId
-                  ? (state.players.find(p => p.id === sp.playerId)?.isUser ? C.accent : "#F59E0B")
-                  : C.border;
-                return (
-                  <View key={sp.id} style={[s.reminderItem, { borderLeftWidth: 3, borderLeftColor: spellOwnerColor }]}>
-                    <Text style={{ fontSize: 18 }}>{typeIcons[sp.type] ?? "★"}</Text>
-                    <View style={{ flex: 1 }}>
-                      <Text style={s.reminderTitle}>{sp.name}</Text>
-                      <Text style={s.reminderDesc}>{[sp.supertype, sp.type, (sp.subtype || sp.subtype2) ? `— ${[sp.subtype, sp.subtype2].filter(Boolean).join("/")}` : null, (sp.power !== undefined && sp.toughness !== undefined) ? `${sp.power}/${sp.toughness}` : null, getSpellCostMeta(sp), sp.currentLoyalty !== undefined ? `👁 ${sp.currentLoyalty}` : null, sp.currentDefense !== undefined ? `⚔ ${sp.currentDefense}` : null, `· T${sp.turnNumber}`, sp.zone !== "active" ? `· ${sp.zone === "graveyard" ? "GY" : "Exile"}` : null, sp.playerId ? `· ${state.players.find(p => p.id === sp.playerId)?.name ?? sp.playerId}` : null].filter(Boolean).join(" ")}</Text>
-                    </View>
-                  </View>
-                );
-              })}
-            </View>
-            <View style={{ height: 10 }} />
-          </>
-        )}
+              <View style={{ height: 10 }} />
+            </>
+          );
+        })()}
 
         {/* EVENTS */}
         <View style={s.card}>
@@ -2680,20 +2813,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                   style={[s.spellTypeBtn, { width: "44%" }]}
                   onPress={() => {
                     if (activeSpell) {
-                      const tgyEntry: TokenGYEntry = {
-                        id: `tgy-${Date.now()}-${Math.random()}`,
-                        name: activeSpell.name,
-                        tokenCategory: "resource",
-                        action: "cracked",
-                        turnNumber: state.turnNumber,
-                        phase: PHASES[state.phaseIndex],
-                        timestamp: Date.now(),
-                        playerId: activeSpell.playerId,
-                      };
-                      dispatch({ type: "ADD_TOKEN_TO_GY", entry: tgyEntry });
-                      dispatch({ type: "DELETE_SPELL", id: activeSpell.id });
-                      dispatch({ type: "ADD_MANUAL_MANA", color: c.key, amount: 1 });
-                      dispatch({ type: "LOG", message: `Cracked Treasure for 1 ${c.label} mana` });
+                      dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: activeSpell.id, intent: "use", manaColor: c.key });
                     }
                     setTreasureColorModal(false);
                   }}
@@ -2707,6 +2827,61 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             <TouchableOpacity style={s.closeBtn} onPress={() => setTreasureColorModal(false)}>
               <Text style={s.closeBtnText}>Cancel</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* MAP EXPLORE MODAL */}
+      <Modal visible={mapModal} transparent animationType="fade" onRequestClose={() => { setMapModal(false); setMapResult(null); setMapSpellId(null); setMapTargetId(null); }}>
+        <View style={s.centeredOverlay}>
+          <View style={s.centeredModal}>
+            <Text style={s.sheetTitle}>Map — Explore</Text>
+            {mapResult === null ? (<>
+              <Text style={[s.reminderDesc, { textAlign: "center", marginBottom: 16 }]}>Target creature explores. What did you reveal?</Text>
+              <TouchableOpacity style={[s.actionBtn, s.confirmBtnOk, { marginBottom: 8 }]} onPress={() => {
+                if (mapSpellId) dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: mapSpellId, intent: "use", mapResult: "land" });
+                setMapModal(false); setMapSpellId(null);
+              }}>
+                <Text style={s.confirmBtnText}>🌲 Land</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]} onPress={() => setMapResult("nonland")}>
+                <Text style={s.confirmBtnText}>📄 Nonland — pick creature for +1/+1</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.cardAlt, borderColor: C.border, marginBottom: 8 }]} onPress={() => {
+                if (mapSpellId) dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: mapSpellId, intent: "use", mapResult: "unknown" });
+                setMapModal(false); setMapSpellId(null);
+              }}>
+                <Text style={s.confirmBtnText}>? Unknown / Skip</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.actionBtn, s.closeBtnStyle]} onPress={() => { setMapModal(false); setMapSpellId(null); }}>
+                <Text style={s.closeBtnText}>Cancel</Text>
+              </TouchableOpacity>
+            </>) : (<>
+              <Text style={[s.reminderDesc, { textAlign: "center", marginBottom: 8 }]}>Nonland revealed. Select a creature to get +1/+1 (optional):</Text>
+              <ScrollView style={{ maxHeight: 200, marginBottom: 8 }}>
+                {state.spellLog.filter(sp => sp.zone === "active" && (sp.type === "Creature" || (sp.isToken && sp.tokenCategory === "creature"))).map(sp => (
+                  <TouchableOpacity
+                    key={sp.id}
+                    style={[s.actionBtn, mapTargetId === sp.id && { borderColor: C.accent, backgroundColor: C.accentDim }, { marginBottom: 6 }]}
+                    onPress={() => setMapTargetId(prev => prev === sp.id ? null : sp.id)}
+                  >
+                    <Text style={s.confirmBtnText}>{sp.name}{sp.power !== undefined ? ` (${sp.power}/${sp.toughness})` : ""}</Text>
+                  </TouchableOpacity>
+                ))}
+                {state.spellLog.filter(sp => sp.zone === "active" && (sp.type === "Creature" || (sp.isToken && sp.tokenCategory === "creature"))).length === 0 && (
+                  <Text style={{ color: C.dim, textAlign: "center", paddingVertical: 8 }}>No creatures on battlefield</Text>
+                )}
+              </ScrollView>
+              <TouchableOpacity style={[s.actionBtn, s.confirmBtnOk, { marginBottom: 8 }]} onPress={() => {
+                if (mapSpellId) dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: mapSpellId, intent: "use", mapResult: "nonland", mapTargetSpellId: mapTargetId ?? undefined });
+                setMapModal(false); setMapResult(null); setMapSpellId(null); setMapTargetId(null);
+              }}>
+                <Text style={s.confirmBtnText}>Confirm{mapTargetId ? " (+1/+1 added)" : " (no target)"}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.actionBtn, s.closeBtnStyle]} onPress={() => { setMapModal(false); setMapResult(null); setMapSpellId(null); setMapTargetId(null); }}>
+                <Text style={s.closeBtnText}>Cancel</Text>
+              </TouchableOpacity>
+            </>)}
           </View>
         </View>
       </Modal>
@@ -2918,104 +3093,101 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             {/* Token — resource */}
             {activeSpell?.type === "Token" && activeSpell?.tokenCategory === "resource" && (() => {
               const spell = activeSpell!;
-              const baseName = spell.name.replace(/^\d+x /, "");
-              const makeTGY = (a: "cracked" | "sacrificed"): TokenGYEntry => ({
-                id: `tgy-${Date.now()}`, name: spell.name, tokenCategory: "resource",
-                action: a, turnNumber: state.turnNumber, phase: PHASES[state.phaseIndex], timestamp: Date.now(),
-                playerId: spell.playerId,
-              });
-              const sacrificeToken = (logMsg: string) => {
-                dispatch({ type: "ADD_TOKEN_TO_GY", entry: makeTGY("sacrificed") });
-                dispatch({ type: "DELETE_SPELL", id: spell.id });
-                dispatch({ type: "LOG", message: logMsg });
+              const baseName = spell.name.replace(/^\d+x\s*/, "").toLowerCase();
+              const use = (extra?: object) => {
+                dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: spell.id, intent: "use", ...extra });
                 setSpellActionModal(false);
               };
-              const deleteToken = (logMsg: string) => {
-                dispatch({ type: "DELETE_SPELL", id: spell.id });
-                dispatch({ type: "LOG", message: logMsg });
-                setSpellActionModal(false);
-              };
+              const sac = () => { dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: spell.id, intent: "sacrifice" }); setSpellActionModal(false); };
+              const del = () => { dispatch({ type: "RESOLVE_RESOURCE_TOKEN", spellId: spell.id, intent: "delete" }); setSpellActionModal(false); };
               const cancelBtn = (
                 <TouchableOpacity style={[s.actionBtn, s.closeBtnStyle]} onPress={() => setSpellActionModal(false)}>
                   <Text style={s.closeBtnText}>Cancel</Text>
                 </TouchableOpacity>
               );
 
-              if (baseName.includes("Treasure")) return (<>
+              if (baseName.includes("treasure")) return (<>
                 <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]}
                   onPress={() => { setSpellActionModal(false); setTreasureColorModal(true); }}>
                   <Text style={s.confirmBtnText}>◈ Crack</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]}
-                  onPress={() => sacrificeToken("Treasure sacrificed")}>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
                   <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]}
-                  onPress={() => deleteToken("Treasure deleted")}>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
                   <Text style={s.confirmBtnText}>✕ Delete</Text>
                 </TouchableOpacity>
                 {cancelBtn}
               </>);
 
-              if (baseName.includes("Food")) return (<>
+              if (baseName.includes("food")) return (<>
                 <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]}
-                  onPress={() => { dispatch({ type: "CHANGE_LIFE_SILENT", delta: 3, playerId: activeSpell?.playerId ?? currentTurnPlayerId }); sacrificeToken("Food used: gained 3 life"); }}>
+                  onPress={() => use()}>
                   <Text style={s.confirmBtnText}>Use — Gain 3 Life</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]}
-                  onPress={() => sacrificeToken("Food sacrificed")}>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
                   <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]}
-                  onPress={() => deleteToken("Food deleted")}>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
                   <Text style={s.confirmBtnText}>✕ Delete</Text>
                 </TouchableOpacity>
                 {cancelBtn}
               </>);
 
-              if (baseName.includes("Clue")) return (<>
+              if (baseName.includes("clue")) return (<>
                 <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]}
-                  onPress={() => { dispatch({ type: "ADD_CARDS_DRAWN", amount: 1 }); sacrificeToken("Clue used: drew 1 card"); }}>
+                  onPress={() => use()}>
                   <Text style={s.confirmBtnText}>Use — Draw 1 Card</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]}
-                  onPress={() => sacrificeToken("Clue sacrificed")}>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
                   <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]}
-                  onPress={() => deleteToken("Clue deleted")}>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
                   <Text style={s.confirmBtnText}>✕ Delete</Text>
                 </TouchableOpacity>
                 {cancelBtn}
               </>);
 
-              if (baseName.includes("Blood")) return (<>
+              if (baseName.includes("blood")) return (<>
                 <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]}
-                  onPress={() => { dispatch({ type: "ADD_CARDS_DRAWN", amount: 1 }); sacrificeToken("Blood used: drew 1 card, discard 1"); }}>
+                  onPress={() => use()}>
                   <Text style={s.confirmBtnText}>Use — Draw 1, Discard 1</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]}
-                  onPress={() => sacrificeToken("Blood sacrificed")}>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
                   <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]}
-                  onPress={() => deleteToken("Blood deleted")}>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
                   <Text style={s.confirmBtnText}>✕ Delete</Text>
                 </TouchableOpacity>
                 {cancelBtn}
               </>);
 
-              if (baseName.includes("Map")) return (<>
+              if (baseName.includes("map")) return (<>
                 <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]}
-                  onPress={() => sacrificeToken("Map used: Scry 1")}>
-                  <Text style={s.confirmBtnText}>Use — Scry 1</Text>
+                  onPress={() => { setMapSpellId(spell.id); setSpellActionModal(false); setMapModal(true); }}>
+                  <Text style={s.confirmBtnText}>Use — Explore</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]}
-                  onPress={() => sacrificeToken("Map sacrificed")}>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
                   <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]}
-                  onPress={() => deleteToken("Map deleted")}>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
+                  <Text style={s.confirmBtnText}>✕ Delete</Text>
+                </TouchableOpacity>
+                {cancelBtn}
+              </>);
+
+              if (baseName.includes("powerstone")) return (<>
+                <TouchableOpacity
+                  style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 4 }, spell.tapped && { opacity: 0.4 }]}
+                  disabled={!!spell.tapped}
+                  onPress={() => use()}>
+                  <Text style={s.confirmBtnText}>Tap for 1 Colorless Mana</Text>
+                </TouchableOpacity>
+                <Text style={{ color: C.muted, fontSize: 11, textAlign: "center", marginBottom: 8 }}>Powerstone mana cannot cast nonartifact spells</Text>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
+                  <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
                   <Text style={s.confirmBtnText}>✕ Delete</Text>
                 </TouchableOpacity>
                 {cancelBtn}
@@ -3023,15 +3195,13 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
 
               return (<>
                 <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]}
-                  onPress={() => sacrificeToken(`${spell.name} used`)}>
+                  onPress={() => use()}>
                   <Text style={s.confirmBtnText}>Use</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]}
-                  onPress={() => sacrificeToken(`${spell.name} sacrificed`)}>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={sac}>
                   <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]}
-                  onPress={() => deleteToken(`${spell.name} deleted`)}>
+                <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={del}>
                   <Text style={s.confirmBtnText}>✕ Delete</Text>
                 </TouchableOpacity>
                 {cancelBtn}
@@ -3042,19 +3212,31 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             {activeSpell?.type === "Token" && activeSpell?.tokenCategory === "creature" && (<>
               <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={() => {
                 if (!activeSpell) return;
-                dispatch({ type: "ADD_TOKEN_TO_GY", entry: { id: `tgy-${Date.now()}`, name: activeSpell.name, tokenCategory: "creature", action: "died", turnNumber: state.turnNumber, phase: PHASES[state.phaseIndex], timestamp: Date.now(), playerId: activeSpell.playerId } });
-                dispatch({ type: "DELETE_SPELL", id: activeSpell.id });
+                dispatch({ type: "CREATURE_TOKEN_EXIT", spellId: activeSpell.id, reason: "died" });
                 setSpellActionModal(false);
               }}>
                 <Text style={s.confirmBtnText}>☠ Die</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.warningDim, borderColor: C.warning, marginBottom: 8 }]} onPress={() => {
                 if (!activeSpell) return;
-                dispatch({ type: "ADD_TOKEN_TO_GY", entry: { id: `tgy-${Date.now()}`, name: activeSpell.name, tokenCategory: "creature", action: "sacrificed", turnNumber: state.turnNumber, phase: PHASES[state.phaseIndex], timestamp: Date.now(), playerId: activeSpell.playerId } });
-                dispatch({ type: "DELETE_SPELL", id: activeSpell.id });
+                dispatch({ type: "CREATURE_TOKEN_EXIT", spellId: activeSpell.id, reason: "sacrificed" });
                 setSpellActionModal(false);
               }}>
                 <Text style={s.confirmBtnText}>⚔ Sacrifice</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={() => {
+                if (!activeSpell) return;
+                dispatch({ type: "CREATURE_TOKEN_EXIT", spellId: activeSpell.id, reason: "destroyed" });
+                setSpellActionModal(false);
+              }}>
+                <Text style={s.confirmBtnText}>💥 Destroy</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.actionBtn, s.confirmBtnWarn, { marginBottom: 8 }]} onPress={() => {
+                if (!activeSpell) return;
+                dispatch({ type: "CREATURE_TOKEN_EXIT", spellId: activeSpell.id, reason: "delete" });
+                setSpellActionModal(false);
+              }}>
+                <Text style={s.confirmBtnText}>✕ Delete</Text>
               </TouchableOpacity>
             </>)}
 
