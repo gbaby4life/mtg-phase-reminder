@@ -224,7 +224,7 @@ export type ManaPool = {
   colorless: { auto: number; manual: number };
 };
 
-export type Player = { id: string; name: string; isUser: boolean; life: number };
+export type Player = { id: string; name: string; isUser: boolean; life: number; color?: string };
 
 export type CommanderRecord = {
   id: string;
@@ -337,4 +337,5 @@ export type Action =
   | { type: "CLEAR_COMBAT" }
   | { type: "CHANGE_CREATURE_COUNTER"; spellId: string; counterType: CreatureCounterType; delta: number }
   | { type: "RESOLVE_RESOURCE_TOKEN"; spellId: string; intent: ResourceTokenIntent; manaColor?: keyof ManaPool; mapTargetSpellId?: string; mapResult?: ResourceTokenMapResult }
-  | { type: "CREATURE_TOKEN_EXIT"; spellId: string; reason: "died" | "sacrificed" | "destroyed" | "delete" };
+  | { type: "CREATURE_TOKEN_EXIT"; spellId: string; reason: "died" | "sacrificed" | "destroyed" | "delete" }
+  | { type: "RESOLVE_COMBAT"; deadSpellIds: string[]; lifeChanges: { playerId: string; delta: number }[] };

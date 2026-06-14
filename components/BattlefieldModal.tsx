@@ -44,6 +44,95 @@ function getEffectivePT(creature: CastSpell): { power?: number; toughness?: numb
   return { power: p, toughness: t };
 }
 
+function hasKw(c: CastSpell, kw: string): boolean {
+  return (c.abilities ?? []).some(a => a.toLowerCase().includes(kw.toLowerCase()));
+}
+type AttackerOutcome = {
+  attacker: CastSpell; blockers: CastSpell[]; isBlocked: boolean;
+  damageToPlayer: number; attackerDies: boolean; deadBlockerIds: string[];
+  lifelinkGain: number; menaceViolation: boolean;
+};
+function calcCombatOutcomes(creatures: CastSpell[], defendingPlayerId: string | undefined): AttackerOutcome[] {
+  const byId = (id: string) => creatures.find(c => c.id === id);
+  return creatures.filter(c => c.attacking).map(att => {
+    const ept = getEffectivePT(att);
+    const power = ept.power ?? 0;
+    const blockers = (att.blockedByIds ?? []).map(byId).filter(Boolean) as CastSpell[];
+    const isBlocked = blockers.length > 0;
+    const deathtouch = hasKw(att, "deathtouch");
+    let remaining = power;
+    let dmgToAtt = 0;
+    const deadBlockerIds: string[] = [];
+    for (const b of blockers) {
+      const bpt = getEffectivePT(b);
+      const bt = bpt.toughness ?? 0;
+      const lethal = deathtouch ? 1 : bt;
+      const assigned = Math.min(remaining, lethal);
+      remaining -= assigned;
+      dmgToAtt += bpt.power ?? 0;
+      const bIndestructible = hasKw(b, "indestructible");
+      const dies = !bIndestructible && bt > 0 && (deathtouch ? assigned >= 1 : assigned >= bt);
+      if (dies) deadBlockerIds.push(b.id);
+    }
+    const damageToPlayer = !isBlocked ? power : (hasKw(att, "trample") ? remaining : 0);
+    const att_t = ept.toughness ?? 0;
+    const attDeathtouchHit = blockers.some(b => hasKw(b, "deathtouch") && (getEffectivePT(b).power ?? 0) > 0);
+    const attIndestructible = hasKw(att, "indestructible");
+    const attackerDies = !attIndestructible && att_t > 0 && (attDeathtouchHit || dmgToAtt >= att_t);
+    const totalDealt = (isBlocked ? blockers.reduce((s, b) => s + Math.min(power, deathtouch ? 1 : (getEffectivePT(b).toughness ?? 0)), 0) : 0) + damageToPlayer;
+    const lifelinkGain = hasKw(att, "lifelink") ? (isBlocked ? Math.min(power, totalDealt) : power) : 0;
+    const menaceViolation = hasKw(att, "menace") && isBlocked && blockers.length < 2;
+    return { attacker: att, blockers, isBlocked, damageToPlayer, attackerDies, deadBlockerIds, lifelinkGain, menaceViolation };
+  });
+}
+
+// Non-P/T counters get an emoji; the six P/T counters are already shown via colored P/T.
+const PT_COUNTER_KEYS = new Set<string>(["+1/+1", "+1/+0", "+0/+1", "-1/-1", "-1/-0", "-0/-1"]);
+const COUNTER_EMOJI: Record<string, string> = {
+  poison: "☠️", charge: "⚡", loyalty: "🛡️", lore: "📖", oil: "🛢️",
+  stun: "💫", flying: "🪶", ki: "✨",
+};
+function nonPTCounterEmoji(creature: CastSpell): string | null {
+  const hit = Object.entries(creature.counters ?? {}).find(([k, v]) => (v ?? 0) > 0 && !PT_COUNTER_KEYS.has(k));
+  if (!hit) return null;
+  return COUNTER_EMOJI[hit[0].toLowerCase()] ?? "🔘"; // generic fallback for any unmapped counter
+}
+
+// Read-only combat preview: damage each creature would take + whether it would die.
+// Reuses the same math as calcCombatOutcomes but indexed per creature for the tile.
+type CreaturePreview = { damageTaken: number; dies: boolean };
+function buildCombatPreviewMap(creatures: CastSpell[]): Map<string, CreaturePreview> {
+  const map = new Map<string, CreaturePreview>();
+  const byId = (id: string) => creatures.find(c => c.id === id);
+  for (const att of creatures.filter(c => c.attacking)) {
+    const aEpt = getEffectivePT(att);
+    const power = aEpt.power ?? 0;
+    const blockers = (att.blockedByIds ?? []).map(byId).filter(Boolean) as CastSpell[];
+    const deathtouch = hasKw(att, "deathtouch");
+    let remaining = power;
+    let dmgToAtt = 0;
+    for (const b of blockers) {
+      const bpt = getEffectivePT(b);
+      const bt = bpt.toughness ?? 0;
+      const lethal = deathtouch ? 1 : bt;
+      const assigned = Math.min(remaining, lethal);
+      remaining -= assigned;
+      dmgToAtt += bpt.power ?? 0;
+      const bIndestructible = hasKw(b, "indestructible");
+      const prev = map.get(b.id) ?? { damageTaken: 0, dies: false };
+      const newDmg = prev.damageTaken + assigned;
+      const dies = !bIndestructible && bt > 0 && (deathtouch ? newDmg >= 1 : newDmg >= bt);
+      map.set(b.id, { damageTaken: newDmg, dies });
+    }
+    const aT = aEpt.toughness ?? 0;
+    const attDeathtouchHit = blockers.some(b => hasKw(b, "deathtouch") && (getEffectivePT(b).power ?? 0) > 0);
+    const attIndestructible = hasKw(att, "indestructible");
+    const attackerDies = !attIndestructible && aT > 0 && (attDeathtouchHit || dmgToAtt >= aT);
+    map.set(att.id, { damageTaken: dmgToAtt, dies: attackerDies });
+  }
+  return map;
+}
+
 function getPTColor(creature: CastSpell): string {
   if (creature.power === undefined || creature.toughness === undefined) return C.text;
   const { power, toughness } = getEffectivePT(creature);
@@ -64,6 +153,10 @@ function getCostMeta(card: Pick<CastSpell, "manaCost" | "manaValue"> | Pick<Comm
 
 export default function BattlefieldModal({ visible, onClose, state, dispatch, onOpenHub, onEditSpell }: Props) {
   const [activeSpell, setActiveSpell] = useState<CastSpell | null>(null);
+  const combatPreview = React.useMemo(
+    () => buildCombatPreviewMap(state.spellLog.filter(sp => sp.zone === "active")),
+    [state.spellLog]
+  );
   const [assignBlockerFor, setAssignBlockerFor] = useState<CastSpell | null>(null);
   const [pickColorSpellId, setPickColorSpellId] = useState<string | null>(null);
   const [mapPickSpellId, setMapPickSpellId] = useState<string | null>(null);
@@ -74,6 +167,14 @@ export default function BattlefieldModal({ visible, onClose, state, dispatch, on
   const [commanderDamageDefenderId, setCommanderDamageDefenderId] = useState<string | null>(null);
   const [commanderDamageAmount, setCommanderDamageAmount] = useState(1);
   const [recastCommander, setRecastCommander] = useState<CommanderRecord | null>(null);
+  const [combatModalOpen, setCombatModalOpen] = useState(false);
+  const [editLifeDelta, setEditLifeDelta] = useState<Record<string, number>>({});
+  const [killChecks, setKillChecks] = useState<Record<string, boolean>>({});
+
+  const opponents = state.players.filter(p => !p.isUser);
+  const [activeOpponentId, setActiveOpponentId] = useState<string>(
+    () => opponents[0]?.id ?? ""
+  );
 
   const creatures = state.spellLog.filter(sp =>
     sp.zone === "active" &&
@@ -125,6 +226,23 @@ export default function BattlefieldModal({ visible, onClose, state, dispatch, on
         <View style={styles.header}>
           <Text style={styles.title}>Battlefield</Text>
           <View style={{ flexDirection: "row", gap: 16, alignItems: "center" }}>
+            {attackers.length > 0 && (
+              <TouchableOpacity onPress={() => {
+                const defId = state.players.find(p => p.id !== attackers[0]?.playerId)?.id;
+                const outcomes = calcCombatOutcomes(creatures, defId);
+                const life: Record<string, number> = {};
+                const kills: Record<string, boolean> = {};
+                for (const o of outcomes) {
+                  if (defId && o.damageToPlayer > 0) life[defId] = (life[defId] ?? 0) - o.damageToPlayer;
+                  if (o.lifelinkGain > 0 && o.attacker.playerId) life[o.attacker.playerId] = (life[o.attacker.playerId] ?? 0) + o.lifelinkGain;
+                  if (o.attackerDies) kills[o.attacker.id] = true;
+                  for (const bid of o.deadBlockerIds) kills[bid] = true;
+                }
+                setEditLifeDelta(life); setKillChecks(kills); setCombatModalOpen(true);
+              }} activeOpacity={0.7}>
+                <Text style={styles.resolveText}>Resolve Combat</Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity onPress={() => dispatch({ type: "CLEAR_COMBAT" })} activeOpacity={0.7}>
               <Text style={styles.clearText}>Clear Combat</Text>
             </TouchableOpacity>
@@ -135,74 +253,235 @@ export default function BattlefieldModal({ visible, onClose, state, dispatch, on
         {allBattlefield.length === 0 && commandZoneCommanders.length === 0 ? (
           <View style={styles.empty}><Text style={styles.emptyText}>No creatures on the battlefield yet.</Text></View>
         ) : (
-          <ScrollView contentContainerStyle={styles.grid}>
-            {commandZoneCommanders.map(commander => {
-              const tax = getNextCommanderTax(commander);
-              const owner = state.players.find(p => p.id === commander.ownerPlayerId);
-              const costMeta = getCostMeta(commander);
-              return (
-                <View key={commander.id} style={styles.commandZoneTile}>
-                  <View style={styles.commandZoneBody}>
-                    <Text style={styles.tileName}>{commander.name}</Text>
-                    <Text style={styles.tileOwner}>{owner?.name ?? "Unknown"} - Zone: Command Zone</Text>
-                    {costMeta && <Text style={styles.tileOwner}>{costMeta}</Text>}
-                    <Text style={styles.commandZoneTax}>Current Commander Tax +{tax}</Text>
-                  </View>
+          <ScrollView contentContainerStyle={styles.gridOuter}>
+            {opponents.length > 1 && (
+              <View style={styles.opponentTabs}>
+                {opponents.map(op => (
                   <TouchableOpacity
-                    style={[styles.smallActionBtn, { borderColor: C.accent }]}
-                    onPress={() => setRecastCommander(commander)}
+                    key={op.id}
+                    style={[styles.opponentTab, activeOpponentId === op.id && styles.opponentTabActive]}
+                    onPress={() => setActiveOpponentId(op.id)}
                   >
-                    <Text style={styles.smallActionText}>Cast from Command Zone</Text>
+                    <Text style={[styles.opponentTabText, activeOpponentId === op.id && styles.opponentTabTextActive]}>
+                      {op.name}
+                    </Text>
                   </TouchableOpacity>
-                </View>
-              );
-            })}
-            {allBattlefield.map(sp => {
-              const owner = state.players.find(p => p.id === sp.playerId);
-              const isMine = owner?.isUser ?? true;
-              const ownerColor = isMine ? C.accent : "#F59E0B";
-              const isResTok = sp.isToken && sp.tokenCategory === "resource";
-              if (isResTok) {
-                const kind = getResourceTokenKind(sp.name);
+                ))}
+              </View>
+            )}
+            {/* Left column — opponents (one at a time) */}
+            <View style={styles.grid}>
+            <View style={styles.splitCol}>
+              {(() => {
+                const player = opponents.find(p => p.id === activeOpponentId);
+                if (!player) return null;
+                const pCmdZone = commandZoneCommanders.filter(c => c.ownerPlayerId === player.id);
+                const pBattlefield = allBattlefield.filter(sp => sp.playerId === player.id);
                 return (
-                  <TouchableOpacity
-                    key={sp.id}
-                    style={[styles.tile, { borderColor: C.warning }, sp.tapped && styles.tileTapped]}
-                    onPress={() => setActiveSpell(sp)}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={styles.tileName}>{sp.name}</Text>
-                    <Text style={styles.commanderBadge}>{kind === "generic" ? "Resource Token" : kind}</Text>
-                    <Text style={[styles.tileOwner, { color: ownerColor }]}>{owner?.name ?? "Unknown"}</Text>
-                    <View style={styles.tileStatusRow}>
-                      {sp.tapped && <Text style={styles.tileStatus}>TAPPED</Text>}
+                  <React.Fragment key={player.id}>
+                    <View style={styles.playerSection}>
+                      <Text style={styles.playerSectionName}>{player.name}</Text>
+                      <Text style={styles.playerSectionLife}>♥ {player.life}</Text>
                     </View>
-                  </TouchableOpacity>
+                    {pCmdZone.map(commander => {
+                      const tax = getNextCommanderTax(commander);
+                      const owner = state.players.find(p => p.id === commander.ownerPlayerId);
+                      const costMeta = getCostMeta(commander);
+                      return (
+                        <View key={commander.id} style={styles.commandZoneTile}>
+                          <View style={styles.commandZoneBody}>
+                            <Text style={styles.tileName}>{commander.name}</Text>
+                            <Text style={styles.tileOwner}>{owner?.name ?? "Unknown"} - Zone: Command Zone</Text>
+                            {costMeta && <Text style={styles.tileOwner}>{costMeta}</Text>}
+                            <Text style={styles.commandZoneTax}>Current Commander Tax +{tax}</Text>
+                          </View>
+                          <TouchableOpacity
+                            style={[styles.smallActionBtn, { borderColor: C.accent }]}
+                            onPress={() => setRecastCommander(commander)}
+                          >
+                            <Text style={styles.smallActionText}>Cast from Command Zone</Text>
+                          </TouchableOpacity>
+                        </View>
+                      );
+                    })}
+                    {pBattlefield.map(sp => {
+                      const owner = state.players.find(p => p.id === sp.playerId);
+                      const isMine = owner?.isUser ?? true;
+                      const ownerColor = owner?.color ?? (isMine ? C.accent : "#F59E0B");
+                      const isResTok = sp.isToken && sp.tokenCategory === "resource";
+                      if (isResTok) {
+                        const kind = getResourceTokenKind(sp.name);
+                        return (
+                          <TouchableOpacity
+                            key={sp.id}
+                            style={[styles.tile, { borderColor: C.warning }, sp.tapped && styles.tileTapped]}
+                            onPress={() => setActiveSpell(sp)}
+                            activeOpacity={0.8}
+                          >
+                            <View style={styles.tileTopRow}>
+                              <Text style={styles.tileName} numberOfLines={1}>{sp.name}</Text>
+                            </View>
+                            <View style={styles.tilePTBox}>
+                              <Text style={styles.tileResKind} numberOfLines={1}>{kind === "generic" ? "Token" : kind}</Text>
+                            </View>
+                            <View style={styles.tileFlags}>
+                              {sp.tapped && <Text style={styles.tileFlag}>🔄</Text>}
+                            </View>
+                          </TouchableOpacity>
+                        );
+                      }
+                      const { power: ep, toughness: et } = getEffectivePT(sp);
+                      const emoji = nonPTCounterEmoji(sp);
+                      const prev = combatPreview.get(sp.id);
+                      const dmg = prev?.damageTaken ?? 0;
+                      const dies = prev?.dies ?? false;
+                      const previewTough = et !== undefined ? Math.max(0, et - dmg) : undefined;
+                      return (
+                        <TouchableOpacity
+                          key={sp.id}
+                          style={[
+                            styles.tile,
+                            { borderColor: sp.attacking ? C.danger : ownerColor },
+                            sp.tapped && styles.tileTapped,
+                            dies && styles.tileDies,
+                          ]}
+                          onPress={() => setActiveSpell(sp)}
+                          activeOpacity={0.8}
+                        >
+                          <View style={styles.tileTopRow}>
+                            <Text style={styles.tileName} numberOfLines={1}>{sp.name}</Text>
+                            {emoji && <Text style={styles.tileCounterEmoji}>{emoji}</Text>}
+                          </View>
+                          <View style={styles.tilePTBox}>
+                            {ep !== undefined && et !== undefined ? (
+                              <Text style={styles.tilePTValue}>
+                                <Text style={{ color: getPTColor(sp) }}>{ep}</Text>
+                                <Text style={{ color: C.muted }}>/</Text>
+                                <Text style={{ color: dmg > 0 ? C.danger : getPTColor(sp) }}>{previewTough}</Text>
+                              </Text>
+                            ) : (
+                              <Text style={styles.tilePTNone}>—</Text>
+                            )}
+                          </View>
+                          <View style={styles.tileFlags}>
+                            {sp.tapped && <Text style={styles.tileFlag}>🔄</Text>}
+                            {sp.attacking && <Text style={styles.tileFlag}>⚔️</Text>}
+                            {(sp.blockingId ?? null) !== null && <Text style={styles.tileFlag}>🛡️</Text>}
+                            {sp.isCommander && <Text style={styles.tileFlag}>👑</Text>}
+                          </View>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </React.Fragment>
                 );
-              }
-              const { power: ep, toughness: et } = getEffectivePT(sp);
-              const counterSummary = getCounterSummary(sp);
-              const isCreatureTok = sp.isToken && sp.tokenCategory === "creature";
-              return (
-                <TouchableOpacity
-                  key={sp.id}
-                  style={[styles.tile, { borderColor: sp.attacking ? C.danger : ownerColor }, sp.tapped && styles.tileTapped]}
-                  onPress={() => setActiveSpell(sp)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.tileName}>{sp.name}</Text>
-                  {isCreatureTok && <Text style={styles.commanderBadge}>Creature Token</Text>}
-                  {sp.isCommander && <Text style={styles.commanderBadge}>Commander</Text>}
-                  <Text style={[styles.tileOwner, { color: ownerColor }]}>{owner?.name ?? "Unknown"}</Text>
-                  {counterSummary && (
-                    <Text style={styles.tileCounters}>Counters: {counterSummary}</Text>
-                  )}
-                  {ep !== undefined && et !== undefined && (
-                    <Text style={[styles.tilePTBadge, { color: getPTColor(sp) }]}>{ep}/{et}</Text>
-                  )}
-                </TouchableOpacity>
-              );
-            })}
+              })()}
+            </View>
+            {/* Right column — you */}
+            <View style={styles.splitCol}>
+              {state.players.filter(p => p.isUser).map(player => {
+                const pCmdZone = commandZoneCommanders.filter(c => c.ownerPlayerId === player.id);
+                const pBattlefield = allBattlefield.filter(sp => sp.playerId === player.id);
+                if (pCmdZone.length === 0 && pBattlefield.length === 0) return null;
+                return (
+                  <React.Fragment key={player.id}>
+                    <View style={styles.playerSection}>
+                      <Text style={styles.playerSectionName}>{player.name} (You)</Text>
+                      <Text style={styles.playerSectionLife}>♥ {player.life}</Text>
+                    </View>
+                    {pCmdZone.map(commander => {
+                      const tax = getNextCommanderTax(commander);
+                      const owner = state.players.find(p => p.id === commander.ownerPlayerId);
+                      const costMeta = getCostMeta(commander);
+                      return (
+                        <View key={commander.id} style={styles.commandZoneTile}>
+                          <View style={styles.commandZoneBody}>
+                            <Text style={styles.tileName}>{commander.name}</Text>
+                            <Text style={styles.tileOwner}>{owner?.name ?? "Unknown"} - Zone: Command Zone</Text>
+                            {costMeta && <Text style={styles.tileOwner}>{costMeta}</Text>}
+                            <Text style={styles.commandZoneTax}>Current Commander Tax +{tax}</Text>
+                          </View>
+                          <TouchableOpacity
+                            style={[styles.smallActionBtn, { borderColor: C.accent }]}
+                            onPress={() => setRecastCommander(commander)}
+                          >
+                            <Text style={styles.smallActionText}>Cast from Command Zone</Text>
+                          </TouchableOpacity>
+                        </View>
+                      );
+                    })}
+                    {pBattlefield.map(sp => {
+                      const owner = state.players.find(p => p.id === sp.playerId);
+                      const isMine = owner?.isUser ?? true;
+                      const ownerColor = owner?.color ?? (isMine ? C.accent : "#F59E0B");
+                      const isResTok = sp.isToken && sp.tokenCategory === "resource";
+                      if (isResTok) {
+                        const kind = getResourceTokenKind(sp.name);
+                        return (
+                          <TouchableOpacity
+                            key={sp.id}
+                            style={[styles.tile, { borderColor: C.warning }, sp.tapped && styles.tileTapped]}
+                            onPress={() => setActiveSpell(sp)}
+                            activeOpacity={0.8}
+                          >
+                            <View style={styles.tileTopRow}>
+                              <Text style={styles.tileName} numberOfLines={1}>{sp.name}</Text>
+                            </View>
+                            <View style={styles.tilePTBox}>
+                              <Text style={styles.tileResKind} numberOfLines={1}>{kind === "generic" ? "Token" : kind}</Text>
+                            </View>
+                            <View style={styles.tileFlags}>
+                              {sp.tapped && <Text style={styles.tileFlag}>🔄</Text>}
+                            </View>
+                          </TouchableOpacity>
+                        );
+                      }
+                      const { power: ep, toughness: et } = getEffectivePT(sp);
+                      const emoji = nonPTCounterEmoji(sp);
+                      const prev = combatPreview.get(sp.id);
+                      const dmg = prev?.damageTaken ?? 0;
+                      const dies = prev?.dies ?? false;
+                      const previewTough = et !== undefined ? Math.max(0, et - dmg) : undefined;
+                      return (
+                        <TouchableOpacity
+                          key={sp.id}
+                          style={[
+                            styles.tile,
+                            { borderColor: sp.attacking ? C.danger : ownerColor },
+                            sp.tapped && styles.tileTapped,
+                            dies && styles.tileDies,
+                          ]}
+                          onPress={() => setActiveSpell(sp)}
+                          activeOpacity={0.8}
+                        >
+                          <View style={styles.tileTopRow}>
+                            <Text style={styles.tileName} numberOfLines={1}>{sp.name}</Text>
+                            {emoji && <Text style={styles.tileCounterEmoji}>{emoji}</Text>}
+                          </View>
+                          <View style={styles.tilePTBox}>
+                            {ep !== undefined && et !== undefined ? (
+                              <Text style={styles.tilePTValue}>
+                                <Text style={{ color: getPTColor(sp) }}>{ep}</Text>
+                                <Text style={{ color: C.muted }}>/</Text>
+                                <Text style={{ color: dmg > 0 ? C.danger : getPTColor(sp) }}>{previewTough}</Text>
+                              </Text>
+                            ) : (
+                              <Text style={styles.tilePTNone}>—</Text>
+                            )}
+                          </View>
+                          <View style={styles.tileFlags}>
+                            {sp.tapped && <Text style={styles.tileFlag}>🔄</Text>}
+                            {sp.attacking && <Text style={styles.tileFlag}>⚔️</Text>}
+                            {(sp.blockingId ?? null) !== null && <Text style={styles.tileFlag}>🛡️</Text>}
+                            {sp.isCommander && <Text style={styles.tileFlag}>👑</Text>}
+                          </View>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </React.Fragment>
+                );
+              })}
+            </View>
+            </View>
           </ScrollView>
         )}
 
@@ -582,23 +861,30 @@ export default function BattlefieldModal({ visible, onClose, state, dispatch, on
           <View style={styles.overlay}>
             <View style={styles.actionSheet}>
               <Text style={styles.title}>Block which attacker?</Text>
-              {attackers.map(att => (
-                <TouchableOpacity
-                  key={att.id}
-                  style={styles.actionBtn}
-                  onPress={() => {
-                    if (assignBlockerFor) {
-                      dispatch({ type: "ASSIGN_BLOCKER", blockerId: assignBlockerFor.id, attackerId: att.id });
-                    }
-                    setAssignBlockerFor(null);
-                  }}
-                >
-                  <Text style={styles.actionBtnText}>
-                    {att.name}{att.power !== undefined ? ` (${att.power}/${att.toughness})` : ""}
-                    {(att.blockedByIds ?? []).length > 0 ? " — already blocked" : ""}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+              {attackers.map(att => {
+                const flyingBlock = hasKw(att, "flying") && assignBlockerFor && !hasKw(assignBlockerFor, "flying") && !hasKw(assignBlockerFor, "reach");
+                const menaceWarn = hasKw(att, "menace") && (att.blockedByIds ?? []).length < 1;
+                return (
+                  <TouchableOpacity
+                    key={att.id}
+                    style={[styles.actionBtn, flyingBlock && styles.counterBtnDisabled]}
+                    disabled={!!flyingBlock}
+                    onPress={() => {
+                      if (assignBlockerFor && !flyingBlock) {
+                        dispatch({ type: "ASSIGN_BLOCKER", blockerId: assignBlockerFor.id, attackerId: att.id });
+                      }
+                      setAssignBlockerFor(null);
+                    }}
+                  >
+                    <Text style={styles.actionBtnText}>
+                      {att.name}{att.power !== undefined ? ` (${att.power}/${att.toughness})` : ""}
+                      {(att.blockedByIds ?? []).length > 0 ? " — already blocked" : ""}
+                      {flyingBlock ? " — can't block (Flying)" : ""}
+                      {menaceWarn ? " — Menace: needs 2 blockers" : ""}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
               <TouchableOpacity style={[styles.actionBtn, styles.cancelBtn]} onPress={() => setAssignBlockerFor(null)}>
                 <Text style={styles.actionBtnText}>Cancel</Text>
               </TouchableOpacity>
@@ -652,6 +938,84 @@ export default function BattlefieldModal({ visible, onClose, state, dispatch, on
                 <Text style={styles.actionBtnText}>Apply Damage</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[styles.actionBtn, styles.cancelBtn]} onPress={closeCommanderDamage}>
+                <Text style={styles.actionBtnText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
+        {/* ── COMBAT RESOLUTION (preview → edit → confirm) ── */}
+        <Modal visible={combatModalOpen} transparent animationType="fade" onRequestClose={() => setCombatModalOpen(false)}>
+          <View style={styles.overlay}>
+            <View style={[styles.actionSheet, { maxWidth: 380 }]}>
+              <Text style={styles.title}>Resolve combat</Text>
+              {(() => {
+                const defId = state.players.find(p => p.id !== attackers[0]?.playerId)?.id;
+                const outcomes = calcCombatOutcomes(creatures, defId);
+                // Every creature in combat = attackers + their blockers, de-duplicated, in display order.
+                const rows: { c: CastSpell; tag: string }[] = [];
+                const seen = new Set<string>();
+                for (const o of outcomes) {
+                  const ept = getEffectivePT(o.attacker);
+                  const pt = (ept.power !== undefined && ept.toughness !== undefined) ? `${ept.power}/${ept.toughness}` : "";
+                  if (!seen.has(o.attacker.id)) { seen.add(o.attacker.id); rows.push({ c: o.attacker, tag: `${o.isBlocked ? "blocked" : "unblocked"} ${pt}`.trim() }); }
+                  for (const b of o.blockers) {
+                    if (seen.has(b.id)) continue;
+                    seen.add(b.id);
+                    const bpt = getEffectivePT(b);
+                    const bptStr = (bpt.power !== undefined && bpt.toughness !== undefined) ? `${bpt.power}/${bpt.toughness}` : "";
+                    rows.push({ c: b, tag: `blocking ${bptStr}`.trim() });
+                  }
+                }
+                return (
+                  <ScrollView style={{ maxHeight: 300 }}>
+                    <Text style={styles.combatSection}>Dies this combat</Text>
+                    {rows.map(({ c, tag }) => {
+                      const dies = !!killChecks[c.id];
+                      return (
+                        <TouchableOpacity key={c.id} style={styles.combatRow} onPress={() => setKillChecks(k => ({ ...k, [c.id]: !k[c.id] }))} activeOpacity={0.7}>
+                          <View style={[styles.combatBox, dies && styles.combatBoxOn]}>
+                            <Text style={styles.combatBoxMark}>{dies ? "✓" : ""}</Text>
+                          </View>
+                          <Text style={[styles.combatName, !dies && styles.combatNameDim]}>{c.name}</Text>
+                          <Text style={styles.combatTag}>{dies ? tag : (tag.startsWith("blocking") ? "survives" : tag)}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                    <View style={styles.combatDivider} />
+                    <Text style={styles.combatSection}>Life</Text>
+                    {state.players.map(p => {
+                      const delta = editLifeDelta[p.id] ?? 0;
+                      return (
+                        <View key={p.id} style={styles.counterRow}>
+                          <Text style={styles.counterLabel}>{p.name}{p.isUser ? " (You)" : ""}</Text>
+                          <TouchableOpacity style={styles.counterBtn} onPress={() => setEditLifeDelta(d => ({ ...d, [p.id]: (d[p.id] ?? 0) - 1 }))}>
+                            <Text style={styles.counterBtnText}>-</Text>
+                          </TouchableOpacity>
+                          <Text style={[styles.counterCount, delta < 0 && { color: C.danger }, delta > 0 && { color: C.success }]}>{delta > 0 ? "+" : ""}{delta}</Text>
+                          <TouchableOpacity style={styles.counterBtn} onPress={() => setEditLifeDelta(d => ({ ...d, [p.id]: (d[p.id] ?? 0) + 1 }))}>
+                            <Text style={styles.counterBtnText}>+</Text>
+                          </TouchableOpacity>
+                        </View>
+                      );
+                    })}
+                  </ScrollView>
+                );
+              })()}
+              <TouchableOpacity
+                style={[styles.actionBtn, styles.actionBtnCombat]}
+                onPress={() => {
+                  const deadSpellIds = Object.keys(killChecks).filter(id => killChecks[id]);
+                  const lifeChanges = Object.entries(editLifeDelta)
+                    .map(([playerId, delta]) => ({ playerId, delta }))
+                    .filter(lc => lc.delta !== 0);
+                  dispatch({ type: "RESOLVE_COMBAT", deadSpellIds, lifeChanges });
+                  setCombatModalOpen(false); setEditLifeDelta({}); setKillChecks({});
+                }}
+              >
+                <Text style={styles.actionBtnText}>✓ Apply combat</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.actionBtn, styles.cancelBtn]} onPress={() => setCombatModalOpen(false)}>
                 <Text style={styles.actionBtnText}>Cancel</Text>
               </TouchableOpacity>
             </View>
@@ -730,10 +1094,21 @@ const styles = StyleSheet.create({
   clearText: { color: C.warning, fontSize: 13, fontWeight: "700" },
   empty: { flex: 1, alignItems: "center", justifyContent: "center" },
   emptyText: { color: C.dim, fontSize: 14 },
-  grid: { flexDirection: "row", flexWrap: "wrap", gap: 10, padding: 16 },
-  tile: { width: "47%", minHeight: 132, backgroundColor: C.card, borderRadius: 12, borderWidth: 2, padding: 12, paddingRight: 58, paddingBottom: 24, gap: 4 },
+  gridOuter: { padding: 6, gap: 6 },
+  grid: { flexDirection: "row", gap: 6, alignItems: "flex-start" },
+  splitCol: { flex: 1, flexDirection: "row", flexWrap: "wrap", gap: 4, alignContent: "flex-start" },
+  tile: { width: "47%", minHeight: 58, backgroundColor: C.card, borderRadius: 9, borderWidth: 2, paddingHorizontal: 6, paddingTop: 5, paddingBottom: 5, gap: 2, justifyContent: "space-between" },
   tileTapped: { opacity: 0.6 },
-  tileName: { color: C.text, fontSize: 14, fontWeight: "700" },
+  tileDies: { backgroundColor: C.dangerDim, borderColor: C.danger },
+  tileName: { color: C.text, fontSize: 9, fontWeight: "700", flex: 1 },
+  tileTopRow: { flexDirection: "row", alignItems: "center", gap: 3 },
+  tileCounterEmoji: { fontSize: 10 },
+  tilePTBox: { alignItems: "center", justifyContent: "center", paddingVertical: 1 },
+  tilePTValue: { fontSize: 18, fontWeight: "900", fontVariant: ["tabular-nums"] },
+  tilePTNone: { fontSize: 14, fontWeight: "700", color: C.dim },
+  tileResKind: { color: C.warning, fontSize: 10, fontWeight: "800" },
+  tileFlags: { flexDirection: "row", gap: 3, justifyContent: "center", minHeight: 12 },
+  tileFlag: { fontSize: 9 },
   commanderBadge: { alignSelf: "flex-start", color: C.warning, fontSize: 10, fontWeight: "900", borderWidth: 1, borderColor: C.warning, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2, marginTop: 2 },
   tilePTBadge: { position: "absolute", right: 12, bottom: 10, color: C.text, fontSize: 18, fontWeight: "900", fontVariant: ["tabular-nums"] },
   tileOwner: { color: C.muted, fontSize: 11, fontWeight: "700" },
@@ -797,4 +1172,22 @@ const styles = StyleSheet.create({
   counterBtn: { width: 32, height: 32, borderRadius: 16, backgroundColor: C.cardAlt, borderWidth: 1, borderColor: C.border, alignItems: "center", justifyContent: "center" },
   counterBtnDisabled: { opacity: 0.35 },
   counterBtnText: { color: C.text, fontSize: 18, lineHeight: 22 },
+  resolveText: { color: C.success, fontSize: 13, fontWeight: "700" },
+  combatSection: { color: C.muted, fontSize: 12, fontWeight: "700", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 },
+  combatRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 9, borderBottomWidth: 0.5, borderBottomColor: C.border },
+  combatBox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1, borderColor: C.border, alignItems: "center", justifyContent: "center" },
+  combatBoxOn: { backgroundColor: C.dangerDim, borderColor: C.danger },
+  combatBoxMark: { color: C.danger, fontSize: 13, fontWeight: "900" },
+  combatName: { flex: 1, color: C.text, fontSize: 14, fontWeight: "700" },
+  combatNameDim: { color: C.muted },
+  combatTag: { color: C.muted, fontSize: 13, fontWeight: "600" },
+  combatDivider: { height: 1, backgroundColor: C.border, marginVertical: 14 },
+  playerSection: { width: "100%", flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 5, paddingHorizontal: 2, marginTop: 8, marginBottom: 2, borderBottomWidth: 1, borderBottomColor: C.border },
+  playerSectionName: { color: C.text, fontSize: 12, fontWeight: "900" },
+  playerSectionLife: { color: C.success, fontSize: 12, fontWeight: "700" },
+  opponentTabs: { width: "100%", flexDirection: "row", flexWrap: "wrap", gap: 4, marginBottom: 4 },
+  opponentTab: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: C.border, backgroundColor: C.card },
+  opponentTabActive: { borderColor: C.accent, backgroundColor: C.accentDim },
+  opponentTabText: { color: C.muted, fontSize: 10, fontWeight: "700" },
+  opponentTabTextActive: { color: C.text },
 });

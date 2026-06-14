@@ -234,6 +234,17 @@ function reminderHasLifeEffect(r: Reminder): boolean {
   return r.effects.some(e => e.timing === "immediate" && (e.effectType === "gain-life" || e.effectType === "lose-life" || e.effectType === "pay-life"));
 }
 
+function hasAbility(c: CastSpell, kw: string): boolean {
+  return (c.abilities ?? []).some(a => a.toLowerCase().includes(kw.toLowerCase()));
+}
+function combatPT(c: CastSpell): { power: number; toughness: number } {
+  const p = c.power ?? 0, t = c.toughness ?? 0, cx = c.counters ?? {};
+  return {
+    power: p + (cx["+1/+1"] ?? 0) + (cx["+1/+0"] ?? 0) - (cx["-1/-1"] ?? 0) - (cx["-1/-0"] ?? 0),
+    toughness: t + (cx["+1/+1"] ?? 0) + (cx["+0/+1"] ?? 0) - (cx["-1/-1"] ?? 0) - (cx["-0/-1"] ?? 0),
+  };
+}
+
 function reducer(state: GameState, action: Action): GameState {
   switch (action.type) {
     case "GO_SETUP": return { ...state, screen: "setup" };
@@ -990,9 +1001,10 @@ function reducer(state: GameState, action: Action): GameState {
       const sp = state.spellLog.find(x => x.id === action.spellId);
       if (!sp) return state;
       const wasTapped = !!sp.tapped;
-      const spellLog = state.spellLog.map(x => x.id === action.spellId ? { ...x, tapped: true, attacking: true, blockingId: null, blockedByIds: x.blockedByIds ?? [] } : x);
-      const entry = logEntry(state, `⚔ ${sp.name} attacks`, sp.playerId);
-      const events = wasTapped ? [] : ["Creature becomes tapped"];
+      const willTap = !hasAbility(sp, "vigilance");
+      const spellLog = state.spellLog.map(x => x.id === action.spellId ? { ...x, tapped: willTap ? true : x.tapped, attacking: true, blockingId: null, blockedByIds: x.blockedByIds ?? [] } : x);
+      const entry = logEntry(state, `⚔ ${sp.name} attacks${willTap ? "" : " (vigilance)"}`, sp.playerId);
+      const events = (willTap && !wasTapped) ? ["Creature becomes tapped"] : [];
       const { reminders, pendingReminderFires } = fireMatchingEvents(state, state.reminders, state.pendingReminderFires, events);
       return { ...state, spellLog, reminders, pendingReminderFires, history: [...state.history, entry] };
     }
@@ -1044,6 +1056,68 @@ function reducer(state: GameState, action: Action): GameState {
       const spellLog = state.spellLog.map(x => ({ ...x, attacking: false, blockedByIds: [], blockingId: null }));
       const entry = logEntry(state, "Combat cleared");
       return { ...state, spellLog, history: [...state.history, entry] };
+    }
+    case "RESOLVE_COMBAT": {
+      // Apply player-confirmed values. No recompute here — the panel already did the math and the player edited/approved it.
+      let players = state.players;
+      const histEntries: HistoryEntry[] = [];
+      for (const lc of action.lifeChanges) {
+        if (lc.delta === 0) continue;
+        players = updatePlayerLife(players, lc.playerId, life => life + lc.delta);
+        const pl = players.find(p => p.id === lc.playerId);
+        const sign = lc.delta > 0 ? "+" : "";
+        histEntries.push(logEntry(state, `${pl?.name ?? lc.playerId}: Life ${sign}${lc.delta} (combat)`, lc.playerId));
+      }
+
+      let spellLog = state.spellLog;
+      let graveyard = state.graveyard;
+      let tokenGY = state.tokenGY;
+      let commanders = state.commanders;
+      let reminders = state.reminders;
+      let pendingReminderFires = state.pendingReminderFires;
+      const currentPhase = PHASES[state.phaseIndex];
+
+      for (const deadId of action.deadSpellIds) {
+        const sp = spellLog.find(x => x.id === deadId);
+        if (!sp) continue;
+        const isCreatureToken = sp.isToken && sp.tokenCategory === "creature";
+        if (isCreatureToken) {
+          tokenGY = [...tokenGY, {
+            id: `tgy-${Date.now()}-${Math.random()}`,
+            name: sp.name, tokenCategory: "creature", action: "died",
+            turnNumber: state.turnNumber, phase: currentPhase, timestamp: Date.now(), playerId: sp.playerId,
+          }];
+          spellLog = spellLog.filter(x => x.id !== deadId);
+          const fired = fireMatchingEvents({ ...state, spellLog }, reminders, pendingReminderFires, ["Token dies", "Creature dies"]);
+          reminders = fired.reminders; pendingReminderFires = fired.pendingReminderFires;
+        } else {
+          graveyard = [...graveyard, {
+            id: `gy-${Date.now()}-${Math.random()}`,
+            name: sp.name, type: sp.type, turnNumber: state.turnNumber, phase: currentPhase, timestamp: Date.now(),
+            source: "died", playerId: sp.playerId, spellId: sp.id,
+            supertype: sp.supertype, subtype: sp.subtype, subtype2: sp.subtype2,
+            isToken: sp.isToken, tokenCategory: sp.tokenCategory,
+            isCommander: sp.isCommander, commanderId: sp.commanderId, commanderOwnerPlayerId: sp.commanderOwnerPlayerId,
+            power: sp.power, toughness: sp.toughness, manaValue: sp.manaValue, manaCost: sp.manaCost, abilities: sp.abilities,
+          }];
+          spellLog = spellLog.map(x => x.id === deadId ? { ...x, zone: "graveyard" as const, attacking: false, blockedByIds: [], blockingId: null } : x);
+          if (sp.commanderId) {
+            commanders = commanders.map(c => c.id === sp.commanderId ? { ...c, currentZone: "graveyard" as const, spellId: sp.id } : c);
+          }
+          const fired = fireMatchingEvents({ ...state, spellLog }, reminders, pendingReminderFires, ["Creature dies", "Creature enters your graveyard", "Card enters your graveyard"]);
+          reminders = fired.reminders; pendingReminderFires = fired.pendingReminderFires;
+        }
+        histEntries.push(logEntry(state, `☠ ${sp.name} died (combat)`, sp.playerId));
+      }
+
+      // Clear combat flags on everything still on the battlefield
+      spellLog = spellLog.map(x => x.zone === "active" ? { ...x, attacking: false, blockedByIds: [], blockingId: null } : x);
+
+      return {
+        ...state, players, life: players.find(p => p.isUser)?.life ?? state.life,
+        spellLog, graveyard, tokenGY, commanders, reminders, pendingReminderFires,
+        history: [...state.history, ...histEntries],
+      };
     }
     case "CHANGE_CREATURE_COUNTER": {
       const sp = state.spellLog.find(x => x.id === action.spellId);
@@ -1151,6 +1225,7 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
   const [gameType, setGameType] = useState("commander");
   const [playerCount, setPlayerCount] = useState(2);
   const [playerNames, setPlayerNames] = useState<string[]>(["Player 1", "Player 2"]);
+  const [playerColors, setPlayerColors] = useState<string[]>(["#7C5CFF", "#F59E0B"]);
   const [firstPlayerIdx, setFirstPlayerIdx] = useState(0);
   const [life, setLife] = useState(40);
   const [commanderForms, setCommanderForms] = useState<CommanderSetupForm[]>(() => [makeCommanderSetupForm(0), makeCommanderSetupForm(1)]);
@@ -1184,11 +1259,18 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
     };
   }, []);
 
+  const PLAYER_COLOR_PALETTE = ["#7C5CFF","#F59E0B","#EF4444","#22C55E","#3B82F6","#EC4899","#14B8A6","#EAB308"];
+
   function handlePlayerCountChange(count: number) {
     setPlayerCount(count);
     setPlayerNames(prev => {
       const next = [...prev];
       while (next.length < count) next.push(`Player ${next.length + 1}`);
+      return next.slice(0, count);
+    });
+    setPlayerColors(prev => {
+      const next = [...prev];
+      while (next.length < count) next.push(PLAYER_COLOR_PALETTE[next.length % PLAYER_COLOR_PALETTE.length]);
       return next.slice(0, count);
     });
     setCommanderForms(prev =>
@@ -1271,6 +1353,7 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
     const players: Player[] = playerNames.map((name, i) => ({
       id: `p${i + 1}`, name: name.trim() || `Player ${i + 1}`,
       isUser: i === 0, life,
+      color: playerColors[i] ?? PLAYER_COLOR_PALETTE[i % PLAYER_COLOR_PALETTE.length],
     }));
     const ids = players.map(p => p.id);
     const turnOrder = [...ids.slice(firstPlayerIdx), ...ids.slice(0, firstPlayerIdx)];
@@ -1355,18 +1438,32 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
 
         {step === 2 && (
           <>
-            <Text style={s.sectionLabel}>Player Names</Text>
+            <Text style={s.sectionLabel}>Player Names &amp; Colors</Text>
             {playerNames.map((name, i) => (
-              <View key={i} style={{ marginBottom: 12 }}>
+              <View key={i} style={{ marginBottom: 16 }}>
                 <Text style={[s.gameTypeDesc, { marginBottom: 6 }]}>{i === 0 ? "You (Player 1)" : `Player ${i + 1}`}</Text>
                 <TextInput
-                  style={s.input}
+                  style={[s.input, { borderColor: playerColors[i] ?? C.border, marginBottom: 8 }]}
                   value={name}
                   onChangeText={text => setPlayerNames(prev => { const n = [...prev]; n[i] = text; return n; })}
                   placeholder={i === 0 ? "Your name" : `Player ${i + 1}`}
                   placeholderTextColor={C.dim}
                   maxLength={24}
                 />
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                  {PLAYER_COLOR_PALETTE.map(color => (
+                    <TouchableOpacity
+                      key={color}
+                      onPress={() => setPlayerColors(prev => { const n = [...prev]; n[i] = color; return n; })}
+                      style={{
+                        width: 28, height: 28, borderRadius: 14,
+                        backgroundColor: color,
+                        borderWidth: playerColors[i] === color ? 3 : 1,
+                        borderColor: playerColors[i] === color ? C.text : "transparent",
+                      }}
+                    />
+                  ))}
+                </View>
               </View>
             ))}
             <TouchableOpacity style={[s.startBtn, !canAdvance2 && { opacity: 0.4 }]} onPress={() => setStep(3)} disabled={!canAdvance2}>
@@ -1378,11 +1475,19 @@ function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
         {step === 3 && (
           <>
             <Text style={s.sectionLabel}>Who Goes First?</Text>
-            {playerNames.map((name, i) => (
-              <TouchableOpacity key={i} style={[s.gameTypeCard, firstPlayerIdx === i && s.gameTypeCardActive]} onPress={() => setFirstPlayerIdx(i)}>
-                <Text style={[s.gameTypeLabel, firstPlayerIdx === i && { color: C.text }]}>{name.trim() || `Player ${i + 1}`}{i === 0 ? " (You)" : ""}</Text>
-              </TouchableOpacity>
-            ))}
+            {playerNames.map((name, i) => {
+              const pColor = playerColors[i] ?? C.accent;
+              const isSelected = firstPlayerIdx === i;
+              return (
+                <TouchableOpacity
+                  key={i}
+                  style={[s.gameTypeCard, isSelected && { borderColor: pColor, backgroundColor: pColor + "22" }]}
+                  onPress={() => setFirstPlayerIdx(i)}
+                >
+                  <Text style={[s.gameTypeLabel, isSelected && { color: C.text }]}>{name.trim() || `Player ${i + 1}`}{i === 0 ? " (You)" : ""}</Text>
+                </TouchableOpacity>
+              );
+            })}
             <TouchableOpacity style={s.startBtn} onPress={() => setStep(4)}>
               <Text style={s.startBtnText}>Next →</Text>
             </TouchableOpacity>
@@ -1606,8 +1711,14 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
     sp.zone === "active" &&
     (sp.type === "Creature" || (sp.type === "Token" && sp.tokenCategory === "creature"))
   );
-  const accentColor = isOppTurn ? "#F59E0B" : C.accent;
-  const accentDimColor = isOppTurn ? "#1A1200" : C.accentDim;
+  const userPlayer = state.players.find(p => p.isUser);
+  const userColor = userPlayer?.color ?? C.accent;
+  const activeOppPlayer = isOppTurn
+    ? (state.players.find(p => p.id === currentTurnPlayerId && !p.isUser) ?? state.players.find(p => !p.isUser))
+    : state.players.find(p => !p.isUser);
+  const oppColor = activeOppPlayer?.color ?? "#F59E0B";
+  const accentColor = isOppTurn ? oppColor : userColor;
+  const accentDimColor = accentColor + "22";
   const [confirmedOppPhases, setConfirmedOppPhases] = useState<string[]>([]);
   const [confirmedMyPhases, setConfirmedMyPhases] = useState<string[]>([]);
   const [cleanupModal, setCleanupModal] = useState(false);
@@ -2069,8 +2180,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             </TouchableOpacity>
           </View>
           {isOppTurn && (
-            <View style={{ backgroundColor: "#1A1200", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: "#F59E0B", alignSelf: "flex-start" }}>
-              <Text style={{ color: "#F59E0B", fontSize: 11, fontWeight: "700" }}>⚡ Opponent's Turn — tap any phase</Text>
+            <View style={{ backgroundColor: accentDimColor, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: accentColor, alignSelf: "flex-start" }}>
+              <Text style={{ color: accentColor, fontSize: 11, fontWeight: "700" }}>⚡ Opponent's Turn — tap any phase</Text>
             </View>
           )}
         </View>
@@ -2091,8 +2202,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 key={ph}
                 style={[
                   s.phaseListCard,
-                  isActive && !isOppTurn && { borderColor: accentColor, backgroundColor: accentDimColor },
-                  isActive && isOppTurn && s.phaseListCardOpp,
+                  isActive && { borderColor: accentColor, backgroundColor: accentDimColor },
                   isDone && { borderColor: C.success },
                 ]}
                 onPress={() => dispatch({ type: "SET_ACTIVE_PHASE", phase: ph })}
@@ -2100,11 +2210,10 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
               >
                 <View>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    {isActive && !isOppTurn && <Text style={{ fontSize: 12, color: accentColor }}>▶</Text>}
-                    {isActive && isOppTurn && <Text style={{ fontSize: 12, color: "#F59E0B" }}>▶</Text>}
+                    {isActive && <Text style={{ fontSize: 12, color: accentColor }}>▶</Text>}
                     <Text style={{
                       fontSize: 16, fontWeight: "700",
-                      color: isDone ? C.success : isActive ? (isOppTurn ? "#F59E0B" : accentColor) : C.text
+                      color: isDone ? C.success : isActive ? accentColor : C.text
                     }}>{ph}</Text>
                   </View>
                   <Text style={{ color: C.dim, fontSize: 11, marginTop: 2 }}>
@@ -2113,7 +2222,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 </View>
                 {isDone
                   ? <Text style={{ color: C.success, fontSize: 18, fontWeight: "700" }}>✓</Text>
-                  : <Text style={{ color: isOppTurn ? "#F59E0B" : accentColor, fontSize: 22 }}>›</Text>
+                  : <Text style={{ color: accentColor, fontSize: 22 }}>›</Text>
                 }
               </TouchableOpacity>
             );
@@ -2123,7 +2232,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
 
         {/* HUB BUTTON */}
         <View style={{ position: "absolute", bottom: 40, right: 16 }}>
-          <TouchableOpacity style={[s.bottomBarHub, isOppTurn && { backgroundColor: "#F59E0B" }]} onPress={() => setHubModal(true)} activeOpacity={0.85}>
+          <TouchableOpacity style={[s.bottomBarHub, { backgroundColor: accentColor }]} onPress={() => setHubModal(true)} activeOpacity={0.85}>
             <Text style={s.bottomBarHubIcon}>◈</Text>
           </TouchableOpacity>
         </View>
@@ -2149,8 +2258,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
           <TouchableOpacity onPress={() => { setLifeCounterHint(null); setLifeCounterModal(true); }} activeOpacity={0.7}>
             <Text style={{ color: C.danger, fontSize: 18, fontWeight: "900" }}>{userLife} life</Text>
           </TouchableOpacity>
-          <View style={[s.turnBadge, isOppTurn && { backgroundColor: "#1A1200", borderColor: "#F59E0B" }]}>
-            <Text style={[s.turnBadgeText, isOppTurn && { color: "#F59E0B" }]}>
+          <View style={[s.turnBadge, { backgroundColor: accentDimColor, borderColor: accentColor }]}>
+            <Text style={[s.turnBadgeText, { color: accentColor }]}>
               {isOppTurn ? "Opp Turn" : `Turn ${state.turnNumber}`}
             </Text>
           </View>
@@ -2175,12 +2284,12 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, paddingBottom: 140 }} showsVerticalScrollIndicator={false}>
 
         {/* PHASE CARD */}
-        <View style={[s.card, isOppTurn && { borderColor: "#F59E0B" }]}>
+        <View style={[s.card, { borderColor: accentColor }]}>
           <View style={{ alignItems: "center", paddingHorizontal: 14, paddingTop: 14, marginBottom: 4 }}>
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 }}>
               {state.phaseLocked && !isOppTurn && <Text style={{ fontSize: 16 }}>🔒</Text>}
-              {isOppTurn && <Text style={{ fontSize: 16, color: "#F59E0B" }}>⚡</Text>}
-              <Text style={[s.phaseName, isOppTurn && { color: "#F59E0B" }]}>{activePhase}</Text>
+              {isOppTurn && <Text style={{ fontSize: 16, color: accentColor }}>⚡</Text>}
+              <Text style={[s.phaseName, { color: accentColor }]}>{activePhase}</Text>
             </View>
             <Text style={[s.phaseProgress, { marginTop: 8 }]}>
               {isOppTurn ? "Opponent's Turn" : `Phase ${state.phaseIndex + 1} of ${PHASES.length}`}
@@ -2190,7 +2299,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             {PHASES.map((ph, i) => {
               const isThis = ph === activePhase;
               const isPast = isOppTurn ? confirmedOppPhases.includes(ph) : i < state.phaseIndex;
-              return <View key={i} style={[s.dot, isThis && { ...s.dotActive, backgroundColor: isOppTurn ? "#F59E0B" : C.accent }, isPast && s.dotPast]} />;
+              return <View key={i} style={[s.dot, isThis && { ...s.dotActive, backgroundColor: accentColor }, isPast && s.dotPast]} />;
             })}
           </View>
         </View>
@@ -2217,7 +2326,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 </View>
               )}
               <TouchableOpacity onPress={() => setRemindersListModal(true)}>
-                <Text style={{ color: C.accent, fontSize: 12, fontWeight: "700" }}>Manage</Text>
+                <Text style={{ color: accentColor, fontSize: 12, fontWeight: "700" }}>Manage</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -2273,9 +2382,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
           const hasAnything = bfCreatures.length > 0 || bfTokens.length > 0 || bfOther.length > 0;
 
           const renderBFRow = (sp: (typeof activePerm)[0]) => {
-            const ownerColor = sp.playerId
-              ? (state.players.find(p => p.id === sp.playerId)?.isUser ? C.accent : "#F59E0B")
-              : C.border;
+            const bfOwner = sp.playerId ? state.players.find(p => p.id === sp.playerId) : undefined;
+            const ownerColor = bfOwner ? (bfOwner.color ?? (bfOwner.isUser ? userColor : oppColor)) : C.border;
             const pt = (sp.power !== undefined && sp.toughness !== undefined) ? `${sp.power}/${sp.toughness}` : null;
             const resourceLabel = sp.isToken && sp.tokenCategory === "resource"
               ? getResourceTokenCompactText(getResourceTokenKind(sp.name))
@@ -2316,7 +2424,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 <View style={s.sectionHead}>
                   <Text style={s.sectionTitle}>Battlefield Preview</Text>
                   <TouchableOpacity onPress={() => setBattlefieldModal(true)}>
-                    <Text style={{ color: C.accent, fontSize: 12, fontWeight: "700" }}>BF</Text>
+                    <Text style={{ color: accentColor, fontSize: 12, fontWeight: "700" }}>BF</Text>
                   </TouchableOpacity>
                 </View>
                 {!hasAnything ? (
@@ -2367,10 +2475,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
       <View style={s.bottomBar}>
         {/* PHASE DONE — always shown */}
         <TouchableOpacity
-          style={[s.bottomBarConfirm, isOppTurn
-            ? { backgroundColor: "#1A1200", borderColor: "#F59E0B" }
-            : s.confirmBtnOk
-          ]}
+          style={[s.bottomBarConfirm, { backgroundColor: accentDimColor, borderColor: accentColor }]}
           onPress={() => {
             const ap = state.activePhaseView;
             if (!ap) return;
@@ -2388,7 +2493,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
           }}
           activeOpacity={0.85}
         >
-          <Text style={[s.bottomBarConfirmText, isOppTurn && { color: "#F59E0B" }]}>
+          <Text style={[s.bottomBarConfirmText, { color: accentColor }]}>
             {isOppTurn
               ? (confirmedOppPhases.includes(state.activePhaseView ?? "") ? "✕ Unconfirm Phase" : "✓ Phase Done")
               : (confirmedMyPhases.includes(state.activePhaseView ?? "") ? "✕ Unconfirm Phase" : "✓ Phase Done")
@@ -2399,26 +2504,26 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
         {/* END MY TURN — only shown on Cleanup on your turn */}
         {!isOppTurn && state.activePhaseView === "Cleanup" && (
           <TouchableOpacity
-            style={[s.bottomBarConfirm, { backgroundColor: C.accentDim, borderColor: C.accent, marginLeft: 8 }]}
+            style={[s.bottomBarConfirm, { backgroundColor: accentDimColor, borderColor: accentColor, marginLeft: 8 }]}
             onPress={() => setCleanupModal(true)}
             activeOpacity={0.85}
           >
-            <Text style={s.bottomBarConfirmText}>✓ End My Turn</Text>
+            <Text style={[s.bottomBarConfirmText, { color: accentColor }]}>✓ End My Turn</Text>
           </TouchableOpacity>
         )}
 
         {/* END OPPONENT TURN — only shown on Cleanup on opponent's turn */}
         {isOppTurn && state.activePhaseView === "Cleanup" && (
           <TouchableOpacity
-            style={[s.bottomBarConfirm, { backgroundColor: "#1A1200", borderColor: "#F59E0B", marginLeft: 8 }]}
+            style={[s.bottomBarConfirm, { backgroundColor: accentDimColor, borderColor: accentColor, marginLeft: 8 }]}
             onPress={() => dispatch({ type: "END_OPPONENT_TURN" })}
             activeOpacity={0.85}
           >
-            <Text style={[s.bottomBarConfirmText, { color: "#F59E0B" }]}>✓ End Opp Turn</Text>
+            <Text style={[s.bottomBarConfirmText, { color: accentColor }]}>✓ End Opp Turn</Text>
           </TouchableOpacity>
         )}
 
-        <TouchableOpacity style={[s.bottomBarHub, isOppTurn && { backgroundColor: "#F59E0B" }]} onPress={() => setHubModal(true)} activeOpacity={0.85}>
+        <TouchableOpacity style={[s.bottomBarHub, { backgroundColor: accentColor }]} onPress={() => setHubModal(true)} activeOpacity={0.85}>
           <Text style={s.bottomBarHubIcon}>◈</Text>
         </TouchableOpacity>
       </View>
@@ -2602,8 +2707,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
               const ownerIndex = state.players.findIndex(p => p.id === effectiveOwner);
               const ownerPlayer = state.players[ownerIndex] ?? state.players[0];
               const isOwnerUser = ownerPlayer?.isUser ?? false;
-              const selectorAccent = isOwnerUser ? C.accent : "#F59E0B";
-              const selectorDim = isOwnerUser ? C.accentDim : "#1A1200";
+              const selectorAccent = ownerPlayer?.color ?? (isOwnerUser ? userColor : oppColor);
+              const selectorDim = selectorAccent + "22";
               const cyclePlayer = () => {
                 const nextIndex = (ownerIndex + 1) % state.players.length;
                 setHubEventOwner(state.players[nextIndex].id);
@@ -2912,9 +3017,9 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
             <Text style={s.sheetTitle}>Game History</Text>
             {(() => {
               const playerIds = Array.from(new Set(state.history.map(e => e.playerId).filter(id => id && id !== "system")));
-              const tabs = [{ id: "all", label: "All" }, ...playerIds.map(id => {
+              const tabs = [{ id: "all", label: "All", color: null as string | null }, ...playerIds.map(id => {
                 const p = state.players.find(pl => pl.id === id);
-                return { id, label: p?.name ?? id };
+                return { id, label: p?.name ?? id, color: p?.color ?? null };
               })];
               const filtered = historyTab === "all"
                 ? state.history
@@ -2923,30 +3028,44 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 <>
                   {tabs.length > 1 && (
                     <View style={[s.gyTabRow, { flexWrap: "wrap" }]}>
-                      {tabs.map(tab => (
-                        <TouchableOpacity
-                          key={tab.id}
-                          onPress={() => setHistoryTab(tab.id)}
-                          style={[s.gyTab, historyTab === tab.id ? s.gyTabActive : s.gyTabInactive]}
-                        >
-                          <Text style={s.gyTabText}>{tab.label}</Text>
-                        </TouchableOpacity>
-                      ))}
+                      {tabs.map(tab => {
+                        const tabColor = tab.color ?? C.accent;
+                        const isActive = historyTab === tab.id;
+                        return (
+                          <TouchableOpacity
+                            key={tab.id}
+                            onPress={() => setHistoryTab(tab.id)}
+                            style={[s.gyTab, isActive
+                              ? { backgroundColor: tabColor + "22", borderColor: tabColor }
+                              : s.gyTabInactive
+                            ]}
+                          >
+                            <Text style={[s.gyTabText, isActive && { color: tabColor }]}>{tab.label}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
                     </View>
                   )}
                   {filtered.length === 0 ? (
                     <Text style={{ color: C.dim, textAlign: "center", paddingVertical: 24 }}>No events logged yet.</Text>
                   ) : (
                     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 8, paddingBottom: 8 }} showsVerticalScrollIndicator={false}>
-                      {[...filtered].reverse().map(entry => (
-                        <View key={entry.id} style={[s.reminderItem, { flexDirection: "column", gap: 2 }]}>
-                          <View style={{ flexDirection: "row", gap: 8 }}>
-                            <Text style={{ fontSize: 11, fontWeight: "700", color: C.accent }}>T{entry.turnNumber}</Text>
-                            <Text style={{ fontSize: 11, color: C.muted }}>{entry.phase}</Text>
+                      {[...filtered].reverse().map(entry => {
+                        const entryPlayer = state.players.find(p => p.id === entry.playerId);
+                        const labelColor = entryPlayer?.color ?? (entryPlayer?.isUser ? userColor : oppColor);
+                        const isMissed = entry.message.startsWith("✗ Missed");
+                        const isResolved = entry.message.startsWith("✓");
+                        const msgColor = isMissed ? C.danger : isResolved ? C.success : C.text;
+                        return (
+                          <View key={entry.id} style={[s.reminderItem, { flexDirection: "column", gap: 2 }]}>
+                            <View style={{ flexDirection: "row", gap: 8 }}>
+                              <Text style={{ fontSize: 11, fontWeight: "700", color: labelColor }}>T{entry.turnNumber}</Text>
+                              <Text style={{ fontSize: 11, color: C.muted }}>{entry.phase}</Text>
+                            </View>
+                            <Text style={{ fontSize: 13, color: msgColor }}>{entry.message}</Text>
                           </View>
-                          <Text style={{ fontSize: 13, color: C.text }}>{entry.message}</Text>
-                        </View>
-                      ))}
+                        );
+                      })}
                     </ScrollView>
                   )}
                 </>
@@ -2973,9 +3092,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                   <>
                     <Text style={[s.sectionLabel, { paddingHorizontal: 14, paddingTop: 8 }]}>On Battlefield</Text>
                     {state.spellLog.filter(sp => sp.zone === "active" && sp.type !== "Land").map(sp => {
-                      const spellOwnerColor = sp.playerId
-                        ? (state.players.find(p => p.id === sp.playerId)?.isUser ? C.accent : "#F59E0B")
-                        : C.border;
+                      const spOwner = sp.playerId ? state.players.find(p => p.id === sp.playerId) : undefined;
+                      const spellOwnerColor = spOwner ? (spOwner.color ?? (spOwner.isUser ? userColor : oppColor)) : C.border;
                       return (
                         <TouchableOpacity key={sp.id} style={[s.reminderItem, { borderLeftWidth: 3, borderLeftColor: spellOwnerColor }]} onPress={() => { setActiveSpell(sp); setSpellLogModal(false); setSpellActionModal(true); }} activeOpacity={0.7}>
                           <Text style={{ fontSize: 18 }}>{typeIcons[sp.type] ?? "★"}</Text>
@@ -2993,9 +3111,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                   <>
                     <Text style={[s.sectionLabel, { paddingHorizontal: 14, paddingTop: 12 }]}>Left Battlefield</Text>
                     {state.spellLog.filter(sp => sp.zone !== "active" && sp.type !== "Land").map(sp => {
-                      const spellOwnerColor = sp.playerId
-                        ? (state.players.find(p => p.id === sp.playerId)?.isUser ? C.accent : "#F59E0B")
-                        : C.border;
+                      const spOwner = sp.playerId ? state.players.find(p => p.id === sp.playerId) : undefined;
+                      const spellOwnerColor = spOwner ? (spOwner.color ?? (spOwner.isUser ? userColor : oppColor)) : C.border;
                       return (
                         <View key={sp.id} style={[s.reminderItem, { opacity: 0.5, borderLeftWidth: 3, borderLeftColor: spellOwnerColor }]}>
                           <Text style={{ fontSize: 18 }}>{typeIcons[sp.type] ?? "★"}</Text>
@@ -3366,8 +3483,8 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                 </TouchableOpacity>
                 {state.players.map(p => {
                   const isActive = gyPlayerFilter === p.id;
-                  const activeBg = p.isUser ? C.accentDim : "#1A1200";
-                  const activeBorder = p.isUser ? C.accent : "#F59E0B";
+                  const activeBorder = p.color ?? (p.isUser ? userColor : oppColor);
+                  const activeBg = activeBorder + "22";
                   return (
                     <TouchableOpacity
                       key={p.id}
@@ -4512,7 +4629,7 @@ function GameScreen({ state, dispatch }: { state: GameState; dispatch: React.Dis
                             : null}
                           <Text style={{ fontSize: 10, color: C.dim }}>🔁 {r.frequency}</Text>
                           {effectSummary ? <Text style={{ fontSize: 10, color: C.success }}>→ {effectSummary}</Text> : null}
-                          <Text style={{ fontSize: 10, color: r.activeDuring === "mine" ? C.accent : r.activeDuring === "opponent" ? "#F59E0B" : C.muted }}>
+                          <Text style={{ fontSize: 10, color: r.activeDuring === "mine" ? userColor : r.activeDuring === "opponent" ? (state.players.find(p => !p.isUser)?.color ?? "#F59E0B") : C.muted }}>
                             {r.activeDuring === "mine" ? "👤 Mine" : r.activeDuring === "opponent" ? "⚡ Opp" : "↔ Both"}
                           </Text>
                         </View>
@@ -5257,5 +5374,4 @@ const s = StyleSheet.create({
   tokenGySmallBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: C.cardAlt, borderWidth: 1, borderColor: C.border },
   tokenGySmallBtnText: { fontSize: 11, fontWeight: "700", color: C.muted },
   phaseListCard: { backgroundColor: C.card, borderRadius: 14, borderWidth: 1, borderColor: C.border, marginBottom: 8, flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 16 },
-  phaseListCardOpp: { borderColor: "#F59E0B" },
 });
