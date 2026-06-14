@@ -1150,7 +1150,7 @@ function MenuScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
             <View><Text style={[s.menuBtnText, { color: C.muted }]}>Settings</Text><Text style={s.menuBtnSub}>Coming soon</Text></View>
           </TouchableOpacity>
         </View>
-        <Text style={s.version}>MTG Phase Reminder • MVP v1.0</Text>
+        <Text style={s.version}>MTG Phase Reminder • MVP v5.2</Text>
       </View>
     </SafeAreaView>
   );
