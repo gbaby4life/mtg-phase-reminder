@@ -126,6 +126,31 @@ export type ReminderContext = {
   cardsDrawnThisTurn?: number;
   isMyTurn?: boolean;
   currentPhase?: string;
+  // Ownership
+  castByIsUser?: boolean;
+  // Spell count this turn
+  spellsCastThisTurn?: number;
+  creaturesCastThisTurn?: number;
+  // Board state
+  myCreatureCount?: number;
+  opponentCreatureCount?: number;
+  cardsInHand?: number;
+  hasPermanentCounter?: boolean;
+  // Life
+  myLife?: number;
+  opponentLife?: number;
+  lifeGainedThisTurn?: number;
+  opponentLifeGainedThisTurn?: number;
+  // Graveyard
+  graveyardSize?: number;
+  graveyardCardTypes?: string[];
+  // Special states
+  isMonarch?: boolean;
+  hasInitiative?: boolean;
+  hasCityBlessing?: boolean;
+  // Counters
+  poisonCounters?: number;
+  energyCounters?: number;
 };
 
 export type ReminderEffectResult = {
@@ -182,7 +207,8 @@ export const GAME_EVENTS: readonly string[] = [
   "Permanent with a counter enters",
 
   // Tokens created
-  "Treasure is created", "Food is created", "Clue is created", "Blood is created", "Token is created",
+  "Treasure is created", "Food is created", "Clue is created", "Blood is created",
+  "Map is created", "Powerstone is created", "Token is created",
 
   // Life
   "Life total changes", "You gain life", "You lose life",
@@ -379,6 +405,8 @@ function evaluateSingleCondition(condition: ReminderCondition, context: Reminder
     // ── Creature properties ────────────────────────────────────────────────────
     case "creature-type-is":
       return context.spellSubtype === condition.value;
+    // Creature and spell Legendary conditions share the same runtime field;
+    // separate condition IDs keep the builder language context-specific.
     case "has-supertype-legendary":
       return context.spellSupertype === "Legendary";
     case "has-supertype-basic":
@@ -418,21 +446,25 @@ function evaluateSingleCondition(condition: ReminderCondition, context: Reminder
         (context.spellAbilities?.includes("Saga") ?? false)
       );
     case "spell-is-modal":
-      return true; // TODO: requires kicked/modal cost tracking in context
+      return false; // not collectable at cast time; conservative default
 
     // ── Ownership / control ────────────────────────────────────────────────────
     case "entered-under-your-control":
+    case "spell-cast-by-you":
+      return context.castByIsUser === true;
     case "entered-under-opponent-control":
     case "spell-cast-by-opponent":
-    case "spell-cast-by-you":
-      return true; // TODO: requires battlefield state
+      return context.castByIsUser === false;
 
     // ── Nth spell / creature this turn ─────────────────────────────────────────
     case "first-spell-this-turn":
+      return (context.spellsCastThisTurn ?? 0) === 1;
     case "second-spell-this-turn":
+      return (context.spellsCastThisTurn ?? 0) === 2;
     case "third-spell-this-turn":
+      return (context.spellsCastThisTurn ?? 0) === 3;
     case "first-creature-this-turn":
-      return true; // TODO: requires spell-count-this-turn in context
+      return (context.creaturesCastThisTurn ?? 0) === 1;
 
     // ── Card / draw counters ───────────────────────────────────────────────────
     case "cards-drawn-gte-2":
@@ -442,38 +474,53 @@ function evaluateSingleCondition(condition: ReminderCondition, context: Reminder
 
     // ── Board state ────────────────────────────────────────────────────────────
     case "you-control-creatures-gte":
+      return (context.myCreatureCount ?? 0) >= parseInt(condition.value ?? "0", 10);
     case "opponent-controls-creatures-gte":
+      return (context.opponentCreatureCount ?? 0) >= parseInt(condition.value ?? "0", 10);
     case "you-control-no-creatures":
+      return (context.myCreatureCount ?? 0) === 0;
     case "cards-in-hand-gte":
+      return (context.cardsInHand ?? 0) >= parseInt(condition.value ?? "0", 10);
     case "cards-in-hand-lte":
-      return true; // TODO: requires battlefield state
+      return (context.cardsInHand ?? 0) <= parseInt(condition.value ?? "0", 10);
 
     // ── Life ───────────────────────────────────────────────────────────────────
     case "life-lte-10":
+      return (context.myLife ?? 9999) <= 10;
     case "life-lte-5":
+      return (context.myLife ?? 9999) <= 5;
     case "opponent-life-lte-10":
+      return (context.opponentLife ?? 9999) <= 10;
     case "opponent-life-lte-5":
+      return (context.opponentLife ?? 9999) <= 5;
     case "you-gained-life-this-turn":
+      return (context.lifeGainedThisTurn ?? 0) > 0;
     case "opponent-gained-life-this-turn":
-      return true; // TODO: requires life total in context
+      return (context.opponentLifeGainedThisTurn ?? 0) > 0;
 
     // ── Graveyard ──────────────────────────────────────────────────────────────
     case "graveyard-gte-5":
+      return (context.graveyardSize ?? 0) >= 5;
     case "threshold":
+      return (context.graveyardSize ?? 0) >= 7;
     case "delirium":
-      return true; // TODO: requires graveyard state in context
+      return (context.graveyardCardTypes?.length ?? 0) >= 4;
 
     // ── Special states ─────────────────────────────────────────────────────────
     case "you-are-monarch":
+      return context.isMonarch === true;
     case "you-have-initiative":
+      return context.hasInitiative === true;
     case "you-have-city-blessing":
-      return true; // TODO: requires game-state flags in context
+      return context.hasCityBlessing === true;
 
     // ── Counter / loyalty state ────────────────────────────────────────────────
     case "permanent-has-counter":
+      return context.hasPermanentCounter === true;
     case "you-have-poison-gte":
+      return (context.poisonCounters ?? 0) >= parseInt(condition.value ?? "0", 10);
     case "you-have-energy-gte":
-      return true; // TODO: requires battlefield state
+      return (context.energyCounters ?? 0) >= parseInt(condition.value ?? "0", 10);
 
     // ── Phase position ─────────────────────────────────────────────────────────
     case "it-is-my-turn":

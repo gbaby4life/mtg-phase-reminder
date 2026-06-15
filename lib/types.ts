@@ -157,6 +157,7 @@ export type CastSpell = {
   tapped?: boolean;
   // Creature combat state (also used by Battlefield)
   attacking?: boolean;
+  defendingPlayerId?: string;
   counters?: Partial<Record<CreatureCounterType, number>>;
   blockedByIds?: string[];
   blockingId?: string | null;
@@ -166,10 +167,9 @@ export type CastSpell = {
   effectNote?: string;
 };
 
-export type GraveyardEntry = {
+export type ZoneEntry = {
   id: string; name: string; type: string;
   turnNumber: number; phase: string; timestamp: number;
-  source: "died" | "sacrificed" | "resolved" | "destroyed";
   playerId?: string;
   spellId?: string;
   supertype?: string;
@@ -187,25 +187,11 @@ export type GraveyardEntry = {
   abilities?: string[];
 };
 
-export type ExileEntry = {
-  id: string; name: string; type: string;
-  turnNumber: number; phase: string; timestamp: number;
-  playerId?: string;
-  spellId?: string;
-  supertype?: string;
-  subtype?: string;
-  subtype2?: string;
-  isToken?: boolean;
-  tokenCategory?: "creature" | "resource" | "status";
-  isCommander?: boolean;
-  commanderId?: string;
-  commanderOwnerPlayerId?: string;
-  power?: number;
-  toughness?: number;
-  manaValue?: number;
-  manaCost?: ManaCost;
-  abilities?: string[];
+export type GraveyardEntry = ZoneEntry & {
+  source: "died" | "sacrificed" | "resolved" | "destroyed";
 };
+
+export type ExileEntry = ZoneEntry;
 
 export type TokenGYEntry = {
   id: string; name: string;
@@ -251,6 +237,16 @@ export type GameState = {
   playerName: string; life: number; startingLife: number;
   gameType: string; turnNumber: number; phaseIndex: number;
   phaseLocked: boolean; cardsDrawn: number; landsPlayed: number;
+  spellsCastThisTurn: number;
+  creaturesCastThisTurn: number;
+  lifeGainedThisTurn: number;
+  opponentLifeGainedThisTurn: number;
+  isMonarch: boolean;
+  hasInitiative: boolean;
+  hasCityBlessing: boolean;
+  poisonCounters: number;
+  energyCounters: number;
+  cardsInHand: number;
   reminders: Reminder[];
   pendingReminderFires: ReminderFireInstance[];
   history: HistoryEntry[]; spellLog: CastSpell[];
@@ -329,8 +325,14 @@ export type Action =
   | { type: "MOVE_COMMANDER_TO_COMMAND_ZONE"; spellId: string }
   | { type: "CAST_COMMANDER_FROM_COMMAND_ZONE"; commanderId: string; spellId?: string }
   // Battlefield actions
+  | { type: "SET_MONARCH"; value: boolean }
+  | { type: "SET_INITIATIVE"; value: boolean }
+  | { type: "SET_CITY_BLESSING"; value: boolean }
+  | { type: "CHANGE_POISON"; delta: number }
+  | { type: "CHANGE_ENERGY"; delta: number }
+  | { type: "CHANGE_CARDS_IN_HAND"; delta: number }
   | { type: "TOGGLE_TAPPED"; spellId: string }
-  | { type: "DECLARE_ATTACKER"; spellId: string }
+  | { type: "DECLARE_ATTACKER"; spellId: string; defendingPlayerId?: string }
   | { type: "REMOVE_FROM_COMBAT"; spellId: string }
   | { type: "ASSIGN_BLOCKER"; blockerId: string; attackerId: string }
   | { type: "REMOVE_BLOCKER"; blockerId: string }
@@ -338,4 +340,5 @@ export type Action =
   | { type: "CHANGE_CREATURE_COUNTER"; spellId: string; counterType: CreatureCounterType; delta: number }
   | { type: "RESOLVE_RESOURCE_TOKEN"; spellId: string; intent: ResourceTokenIntent; manaColor?: keyof ManaPool; mapTargetSpellId?: string; mapResult?: ResourceTokenMapResult }
   | { type: "CREATURE_TOKEN_EXIT"; spellId: string; reason: "died" | "sacrificed" | "destroyed" | "delete" }
-  | { type: "RESOLVE_COMBAT"; deadSpellIds: string[]; lifeChanges: { playerId: string; delta: number }[] };
+  | { type: "RESOLVE_COMBAT"; deadSpellIds: string[]; lifeChanges: { playerId: string; delta: number }[] }
+  | { type: "HYDRATE"; state: GameState };
