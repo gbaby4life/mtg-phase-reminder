@@ -1,3 +1,15 @@
+export type CounterDef = {
+  key: string;
+  label: string;
+  icon: string;
+  lossThreshold?: number;
+};
+
+export const COUNTER_DEFS: CounterDef[] = [
+  { key: "poison", label: "Poison", icon: "☠️", lossThreshold: 10 },
+  { key: "energy", label: "Energy", icon: "⚡", lossThreshold: undefined },
+];
+
 export const PHASES = [
   "Untap", "Upkeep", "Draw", "Main Phase 1",
   "Beginning of Combat", "Declare Attackers", "Declare Blockers",

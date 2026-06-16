@@ -23,7 +23,7 @@ export const INIT: GameState = {
   spellsCastThisTurn: 0, creaturesCastThisTurn: 0,
   lifeGainedThisTurn: 0, opponentLifeGainedThisTurn: 0,
   isMonarch: false, hasInitiative: false, hasCityBlessing: false,
-  poisonCounters: 0, energyCounters: 0, cardsInHand: 7,
+  cardsInHand: 7,
   reminders: makeDefaultReminders(),
   pendingReminderFires: [],
   history: [], spellLog: [],
@@ -121,7 +121,7 @@ export function reducer(state: GameState, action: Action): GameState {
         spellsCastThisTurn: 0, creaturesCastThisTurn: 0,
         lifeGainedThisTurn: 0, opponentLifeGainedThisTurn: 0,
         isMonarch: false, hasInitiative: false, hasCityBlessing: false,
-        poisonCounters: 0, energyCounters: 0, cardsInHand: 7,
+        cardsInHand: 7,
         reminders: activatePhaseReminders(makeDefaultReminders(), PHASES[0], !startsAsOpponent), pendingReminderFires: [],
         history: [], spellLog: [],
         commanders: action.commanders ?? [], commanderDamage: action.commanderDamage ?? {},
@@ -851,8 +851,14 @@ export function reducer(state: GameState, action: Action): GameState {
     case "SET_MONARCH":          return { ...state, isMonarch: action.value };
     case "SET_INITIATIVE":       return { ...state, hasInitiative: action.value };
     case "SET_CITY_BLESSING":    return { ...state, hasCityBlessing: action.value };
-    case "CHANGE_POISON":        return { ...state, poisonCounters: Math.max(0, state.poisonCounters + action.delta) };
-    case "CHANGE_ENERGY":        return { ...state, energyCounters: Math.max(0, state.energyCounters + action.delta) };
+    case "CHANGE_COUNTER": {
+      const players = state.players.map(p => {
+        if (p.id !== action.playerId) return p;
+        const current = (p.counters?.[action.counterKey] ?? 0);
+        return { ...p, counters: { ...(p.counters ?? {}), [action.counterKey]: Math.max(0, current + action.delta) } };
+      });
+      return { ...state, players };
+    }
     case "CHANGE_CARDS_IN_HAND": return { ...state, cardsInHand: Math.max(0, state.cardsInHand + action.delta) };
     case "TOGGLE_TAPPED": {
       const sp = state.spellLog.find(x => x.id === action.spellId);

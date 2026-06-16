@@ -18,7 +18,7 @@ import {
   SPELL_TYPES, MANA_COLORS, RESOURCE_TOKENS, RAINBOW_COLORS, MTG_SUPERTYPES,
   MTG_ARTIFACT_SUBTYPES, MTG_BATTLE_SUBTYPES, MTG_CREATURE_SUBTYPES, MTG_ENCHANTMENT_SUBTYPES,
   MTG_LAND_SUBTYPES, MTG_PLANESWALKER_SUBTYPES, MTG_SPELL_SUBTYPES,
-  MTG_SUBTYPES_BY_TYPE,
+  MTG_SUBTYPES_BY_TYPE, COUNTER_DEFS,
 } from "../lib/constants";
 import { buildBaseContext, combatPT } from "../lib/gameHelpers";
 import { s } from "../lib/styles";
@@ -129,6 +129,8 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
   const [reminderPopupMode, setReminderPopupMode] = useState<"once-per-phase-per-turn" | "always">("once-per-phase-per-turn");
   const [shownPhaseReminderKeys, setShownPhaseReminderKeys] = useState<string[]>([]);
   const [lifeCounterModal, setLifeCounterModal] = useState(false);
+  const [countersModal, setCountersModal] = useState(false);
+  const [selectedCounter, setSelectedCounter] = useState<string | null>(null);
   const [lifeCounterHint, setLifeCounterHint] = useState<string | null>(null);
   const [commanderDamageEdit, setCommanderDamageEdit] = useState<{ defendingPlayerId: string; commanderId: string; amount: number } | null>(null);
   const [commanderLethalAlerts, setCommanderLethalAlerts] = useState<CommanderLethalAlert[]>([]);
@@ -774,7 +776,7 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 10 }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
               <Text style={{ fontSize: 14, fontWeight: "700", color: C.muted }}>Special State / Counters</Text>
-              {(state.isMonarch || state.hasInitiative || state.hasCityBlessing || state.poisonCounters > 0 || state.energyCounters > 0) && (
+              {(state.isMonarch || state.hasInitiative || state.hasCityBlessing) && (
                 <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: accentColor }} />
               )}
             </View>
@@ -811,33 +813,6 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
                     {state.hasCityBlessing ? "✨ City's Blessing" : "Gain City's Blessing"}
                   </Text>
                 </TouchableOpacity>
-              </View>
-              {/* Counter rows */}
-              <View style={{ flexDirection: "row", gap: 16 }}>
-                <View style={{ flex: 1, alignItems: "center", gap: 4 }}>
-                  <Text style={{ color: C.danger, fontSize: 12, fontWeight: "700" }}>☠ Poison</Text>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <TouchableOpacity onPress={() => dispatch({ type: "CHANGE_POISON", delta: -1 })} style={{ width: 28, height: 28, borderRadius: 6, backgroundColor: C.cardAlt, alignItems: "center", justifyContent: "center" }}><Text style={{ color: C.text, fontWeight: "700" }}>−</Text></TouchableOpacity>
-                    <Text style={{ color: state.poisonCounters >= 10 ? C.danger : C.text, fontWeight: "900", fontSize: 18, minWidth: 24, textAlign: "center" }}>{state.poisonCounters}</Text>
-                    <TouchableOpacity onPress={() => dispatch({ type: "CHANGE_POISON", delta: 1 })} style={{ width: 28, height: 28, borderRadius: 6, backgroundColor: C.cardAlt, alignItems: "center", justifyContent: "center" }}><Text style={{ color: C.text, fontWeight: "700" }}>+</Text></TouchableOpacity>
-                  </View>
-                </View>
-                <View style={{ flex: 1, alignItems: "center", gap: 4 }}>
-                  <Text style={{ color: C.success, fontSize: 12, fontWeight: "700" }}>⚡ Energy</Text>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <TouchableOpacity onPress={() => dispatch({ type: "CHANGE_ENERGY", delta: -1 })} style={{ width: 28, height: 28, borderRadius: 6, backgroundColor: C.cardAlt, alignItems: "center", justifyContent: "center" }}><Text style={{ color: C.text, fontWeight: "700" }}>−</Text></TouchableOpacity>
-                    <Text style={{ color: C.text, fontWeight: "900", fontSize: 18, minWidth: 24, textAlign: "center" }}>{state.energyCounters}</Text>
-                    <TouchableOpacity onPress={() => dispatch({ type: "CHANGE_ENERGY", delta: 1 })} style={{ width: 28, height: 28, borderRadius: 6, backgroundColor: C.cardAlt, alignItems: "center", justifyContent: "center" }}><Text style={{ color: C.text, fontWeight: "700" }}>+</Text></TouchableOpacity>
-                  </View>
-                </View>
-                <View style={{ flex: 1, alignItems: "center", gap: 4 }}>
-                  <Text style={{ color: accentColor, fontSize: 12, fontWeight: "700" }}>🃏 Hand</Text>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <TouchableOpacity onPress={() => dispatch({ type: "CHANGE_CARDS_IN_HAND", delta: -1 })} style={{ width: 28, height: 28, borderRadius: 6, backgroundColor: C.cardAlt, alignItems: "center", justifyContent: "center" }}><Text style={{ color: C.text, fontWeight: "700" }}>−</Text></TouchableOpacity>
-                    <Text style={{ color: C.text, fontWeight: "900", fontSize: 18, minWidth: 24, textAlign: "center" }}>{state.cardsInHand}</Text>
-                    <TouchableOpacity onPress={() => dispatch({ type: "CHANGE_CARDS_IN_HAND", delta: 1 })} style={{ width: 28, height: 28, borderRadius: 6, backgroundColor: C.cardAlt, alignItems: "center", justifyContent: "center" }}><Text style={{ color: C.text, fontWeight: "700" }}>+</Text></TouchableOpacity>
-                  </View>
-                </View>
               </View>
             </View>
           )}
@@ -3739,9 +3714,66 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
                 );
               })}
             </ScrollView>
+            <TouchableOpacity style={[s.closeBtnWide, { marginTop: 8, backgroundColor: C.accentDim, borderColor: C.accent }]} onPress={() => { setLifeCounterModal(false); setLifeCounterHint(null); setSelectedCounter(null); setCountersModal(true); }}>
+              <Text style={[s.closeBtnText, { color: C.accent }]}>Counters</Text>
+            </TouchableOpacity>
             <TouchableOpacity style={[s.closeBtnWide, { marginTop: 8 }]} onPress={() => { setLifeCounterModal(false); setLifeCounterHint(null); }}>
               <Text style={s.closeBtnText}>Close</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={countersModal} transparent animationType="slide" onRequestClose={() => { setCountersModal(false); setSelectedCounter(null); }}>
+        <View style={{ flex: 1, justifyContent: "flex-end" }}>
+          <TouchableOpacity style={s.backdrop} onPress={() => { setCountersModal(false); setSelectedCounter(null); }} />
+          <View style={[s.sheet, { maxHeight: "85%", flex: 1 }]}>
+            <View style={s.handle} />
+            {selectedCounter === null ? (
+              <>
+                <Text style={s.sheetTitle}>Counters</Text>
+                <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+                  {COUNTER_DEFS.map(def => (
+                    <TouchableOpacity
+                      key={def.key}
+                      style={[s.manaRow, { alignItems: "center" }]}
+                      onPress={() => setSelectedCounter(def.key)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[s.manaLabel, { flex: 1 }]}>{def.icon} {def.label}</Text>
+                      <Text style={{ color: C.accent, fontSize: 13, fontWeight: "700" }}>›</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+                <TouchableOpacity style={[s.closeBtnWide, { marginTop: 8 }]} onPress={() => { setCountersModal(false); setLifeCounterHint(null); setLifeCounterModal(true); }}>
+                  <Text style={s.closeBtnText}>Back</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <Text style={s.sheetTitle}>{COUNTER_DEFS.find(d => d.key === selectedCounter)?.label ?? "Counter"}</Text>
+                <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+                  {state.players.map(p => {
+                    const value = p.counters?.[selectedCounter] ?? 0;
+                    return (
+                      <View key={p.id} style={[s.manaRow, { borderBottomWidth: 1, borderBottomColor: C.border }]}>
+                        <Text style={[s.manaLabel]}>{p.name}{p.isUser ? " (You)" : ""}</Text>
+                        <Text style={s.manaTotal}>{value}</Text>
+                        <TouchableOpacity style={s.manaBtn} onPress={() => dispatch({ type: "CHANGE_COUNTER", counterKey: selectedCounter, delta: -1, playerId: p.id })}>
+                          <Text style={s.manaBtnText}>−</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={s.manaBtn} onPress={() => dispatch({ type: "CHANGE_COUNTER", counterKey: selectedCounter, delta: 1, playerId: p.id })}>
+                          <Text style={s.manaBtnText}>+</Text>
+                        </TouchableOpacity>
+                      </View>
+                    );
+                  })}
+                </ScrollView>
+                <TouchableOpacity style={[s.closeBtnWide, { marginTop: 8 }]} onPress={() => setSelectedCounter(null)}>
+                  <Text style={s.closeBtnText}>Back</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         </View>
       </Modal>

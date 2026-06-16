@@ -210,7 +210,7 @@ export type ManaPool = {
   colorless: { auto: number; manual: number };
 };
 
-export type Player = { id: string; name: string; isUser: boolean; life: number; color?: string };
+export type Player = { id: string; name: string; isUser: boolean; life: number; color?: string; counters?: Record<string, number> };
 
 export type CommanderRecord = {
   id: string;
@@ -244,8 +244,6 @@ export type GameState = {
   isMonarch: boolean;
   hasInitiative: boolean;
   hasCityBlessing: boolean;
-  poisonCounters: number;
-  energyCounters: number;
   cardsInHand: number;
   reminders: Reminder[];
   pendingReminderFires: ReminderFireInstance[];
@@ -329,8 +327,7 @@ export type Action =
   | { type: "SET_MONARCH"; value: boolean }
   | { type: "SET_INITIATIVE"; value: boolean }
   | { type: "SET_CITY_BLESSING"; value: boolean }
-  | { type: "CHANGE_POISON"; delta: number }
-  | { type: "CHANGE_ENERGY"; delta: number }
+  | { type: "CHANGE_COUNTER"; counterKey: string; delta: number; playerId: string }
   | { type: "CHANGE_CARDS_IN_HAND"; delta: number }
   | { type: "TOGGLE_TAPPED"; spellId: string }
   | { type: "DECLARE_ATTACKER"; spellId: string; defendingPlayerId?: string }
