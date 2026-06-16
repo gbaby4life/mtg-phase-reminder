@@ -17,7 +17,7 @@ import {
 
 export const INIT: GameState = {
   screen: "menu", isMyTurn: true, activePhaseView: null,
-  playerName: "Player 1", life: 20, startingLife: 20,
+  playerName: "Player 1",
   gameType: "standard", turnNumber: 1, phaseIndex: 0,
   phaseLocked: false, cardsDrawn: 0, landsPlayed: 0,
   spellsCastThisTurn: 0, creaturesCastThisTurn: 0,
@@ -91,7 +91,19 @@ function applyReminderManaAndLandEffects(
 
 export function reducer(state: GameState, action: Action): GameState {
   switch (action.type) {
-    case "HYDRATE": return { ...INIT, ...action.state };
+    case "HYDRATE": {
+      const normSpell = (s: CastSpell) =>
+        s.isToken === undefined && s.type === "Token" ? { ...s, isToken: true as const } : s;
+      const normZone = <T extends { isToken?: boolean; type: string }>(e: T): T =>
+        e.isToken === undefined && e.type === "Token" ? { ...e, isToken: true as const } : e;
+      return {
+        ...INIT,
+        ...action.state,
+        spellLog: action.state.spellLog?.map(normSpell) ?? INIT.spellLog,
+        graveyard: action.state.graveyard?.map(normZone) ?? INIT.graveyard,
+        exile: action.state.exile?.map(normZone) ?? INIT.exile,
+      };
+    }
     case "GO_SETUP": return { ...state, screen: "setup" };
     case "GO_MENU": return { ...INIT };
     case "START_GAME": {
@@ -103,7 +115,7 @@ export function reducer(state: GameState, action: Action): GameState {
         screen: startsAsOpponent ? "opponent-turn" : "game",
         isMyTurn: !startsAsOpponent,
         activePhaseView: null,
-        playerName: action.playerName, life: action.life, startingLife: action.life,
+        playerName: action.playerName,
         gameType: action.gameType, turnNumber: 1, phaseIndex: 0,
         phaseLocked: false, cardsDrawn: 0, landsPlayed: 0,
         spellsCastThisTurn: 0, creaturesCastThisTurn: 0,
@@ -152,7 +164,7 @@ export function reducer(state: GameState, action: Action): GameState {
     case "CHANGE_LIFE": {
       const playerId = getActivePlayerId(state, action.playerId);
       const player = state.players.find(p => p.id === playerId);
-      const oldLife = player?.life ?? state.life;
+      const oldLife = player?.life ?? 0;
       const newLife = oldLife + action.delta;
       const sign = action.delta > 0 ? "+" : "";
       const entry = logEntry(state, `${player?.name ?? state.playerName}: Life ${sign}${action.delta} → ${newLife}`, playerId);
@@ -160,7 +172,7 @@ export function reducer(state: GameState, action: Action): GameState {
       const isUserLifeChange = player?.isUser ?? false;
       const lifeGained = action.delta > 0 ? action.delta : 0;
       return {
-        ...state, players, life: players.find(p => p.isUser)?.life ?? newLife,
+        ...state, players,
         lifeGainedThisTurn: isUserLifeChange ? state.lifeGainedThisTurn + lifeGained : state.lifeGainedThisTurn,
         opponentLifeGainedThisTurn: !isUserLifeChange ? state.opponentLifeGainedThisTurn + lifeGained : state.opponentLifeGainedThisTurn,
         history: [...state.history, entry],
@@ -169,12 +181,12 @@ export function reducer(state: GameState, action: Action): GameState {
     case "CHANGE_LIFE_SILENT": {
       const playerId = getActivePlayerId(state, action.playerId);
       const player = state.players.find(p => p.id === playerId);
-      const newLife = (player?.life ?? state.life) + action.delta;
+      const newLife = (player?.life ?? 0) + action.delta;
       const players = updatePlayerLife(state.players, playerId, () => newLife);
       const isUserLifeChange = player?.isUser ?? false;
       const lifeGained = action.delta > 0 ? action.delta : 0;
       return {
-        ...state, players, life: players.find(p => p.isUser)?.life ?? newLife,
+        ...state, players,
         lifeGainedThisTurn: isUserLifeChange ? state.lifeGainedThisTurn + lifeGained : state.lifeGainedThisTurn,
         opponentLifeGainedThisTurn: !isUserLifeChange ? state.opponentLifeGainedThisTurn + lifeGained : state.opponentLifeGainedThisTurn,
       };
@@ -184,7 +196,7 @@ export function reducer(state: GameState, action: Action): GameState {
       const player = state.players.find(p => p.id === playerId);
       const entry = logEntry(state, `${player?.name ?? state.playerName}: Life set to ${action.value}`, playerId);
       const players = updatePlayerLife(state.players, playerId, () => action.value);
-      return { ...state, players, life: players.find(p => p.isUser)?.life ?? action.value, history: [...state.history, entry] };
+      return { ...state, players, history: [...state.history, entry] };
     }
     case "RESOLVE_REMINDER": {
       const r = state.reminders.find(x => x.id === action.id);
@@ -201,7 +213,6 @@ export function reducer(state: GameState, action: Action): GameState {
       }
       const result = applyImmediateEffects(r);
       let players = state.players;
-      let life = players.find(p => p.isUser)?.life ?? state.life;
       let cardsDrawn = state.cardsDrawn + (result.cardsDrawnDelta ?? 0);
       let landsPlayed = state.landsPlayed + (result.landsPlayedDelta ?? 0);
       let manaPool = { ...state.manaPool };
@@ -229,7 +240,6 @@ export function reducer(state: GameState, action: Action): GameState {
         ...state,
         reminders,
         players,
-        life,
         cardsDrawn,
         landsPlayed,
         spellLog,
@@ -256,7 +266,7 @@ export function reducer(state: GameState, action: Action): GameState {
         zone: "active",
         playerId: action.spellData.playerId ?? state.eventOwnerPlayerId ?? state.turnOrder[state.currentPlayerIndex],
       };
-      const isToken = spell.isToken ?? spell.type === "Token";
+      const isToken = !!spell.isToken;
       const ptPart = spell.power !== undefined && spell.toughness !== undefined
         ? ` ${spell.power}/${spell.toughness}` : "";
       const superPart = spell.supertype ? `${spell.supertype} ` : "";
@@ -388,7 +398,7 @@ export function reducer(state: GameState, action: Action): GameState {
       if (oldDamage < 21 && newDamage >= 21) {
         entries.push(logEntry(state, `⚠ ${defender.name} has lethal commander damage from ${commander.name}.`, action.defendingPlayerId));
       }
-      return { ...state, players, life: players.find(p => p.isUser)?.life ?? state.life, commanderDamage, history: [...state.history, ...entries] };
+      return { ...state, players, commanderDamage, history: [...state.history, ...entries] };
     }
     case "SET_COMMANDER_DAMAGE": {
       const amount = Math.max(0, action.amount);
@@ -763,7 +773,6 @@ export function reducer(state: GameState, action: Action): GameState {
       }
       const result = applyImmediateEffects(r);
       let players = state.players;
-      let life = players.find(p => p.isUser)?.life ?? state.life;
       let cardsDrawn = state.cardsDrawn + (result.cardsDrawnDelta ?? 0);
       let landsPlayed = state.landsPlayed + (result.landsPlayedDelta ?? 0);
       let manaPool = { ...state.manaPool };
@@ -771,7 +780,7 @@ export function reducer(state: GameState, action: Action): GameState {
       ({ manaPool, spellLog } = applyReminderManaAndLandEffects(state, result, manaPool, spellLog));
       const histEntries = [entry];
       if (result.logMessage) histEntries.push(logEntry(state, result.logMessage, myPlayerId));
-      return { ...state, players, life, cardsDrawn, landsPlayed, spellLog, manaPool, pendingReminderFires: state.pendingReminderFires.filter(x => x.id !== action.fireId), history: [...state.history, ...histEntries] };
+      return { ...state, players, cardsDrawn, landsPlayed, spellLog, manaPool, pendingReminderFires: state.pendingReminderFires.filter(x => x.id !== action.fireId), history: [...state.history, ...histEntries] };
     }
     case "PARK_REMINDER_FIRE": {
       const fire = state.pendingReminderFires.find(x => x.id === action.fireId);
@@ -878,7 +887,7 @@ export function reducer(state: GameState, action: Action): GameState {
       return { ...state, spellLog, history: [...state.history, entry] };
     }
     case "CLEAR_COMBAT": {
-      const spellLog = state.spellLog.map(x => ({ ...x, attacking: false, defendingPlayerId: undefined, blockedByIds: [], blockingId: null }));
+      const spellLog = state.spellLog.map(x => x.zone !== "active" ? x : { ...x, attacking: false, defendingPlayerId: undefined, blockedByIds: [], blockingId: null });
       const entry = logEntry(state, "Combat cleared");
       return { ...state, spellLog, history: [...state.history, entry] };
     }
@@ -939,7 +948,7 @@ export function reducer(state: GameState, action: Action): GameState {
       spellLog = spellLog.map(x => x.zone === "active" ? { ...x, attacking: false, defendingPlayerId: undefined, blockedByIds: [], blockingId: null } : x);
 
       return {
-        ...state, players, life: players.find(p => p.isUser)?.life ?? state.life,
+        ...state, players,
         spellLog, graveyard, tokenGY, commanders, reminders, pendingReminderFires,
         history: [...state.history, ...histEntries],
       };

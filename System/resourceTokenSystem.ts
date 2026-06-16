@@ -67,7 +67,7 @@ export function getResourceTokenKind(name: string): ResourceTokenKind {
 }
 
 export function isResourceTokenSpell(spell: CastSpell): boolean {
-  return spell.type === "Token" && spell.tokenCategory === "resource";
+  return !!spell.isToken && spell.tokenCategory === "resource";
 }
 
 // ─── main resolver ─────────────────────────────────────────────────────────────
@@ -120,9 +120,9 @@ export function resolveResourceToken(
 
   const updateLife = (s: GameState, pid: string, delta: number): GameState => {
     const player = s.players.find(p => p.id === pid);
-    const newLife = (player?.life ?? s.life) + delta;
+    const newLife = (player?.life ?? 0) + delta;
     const players = s.players.map(p => p.id === pid ? { ...p, life: newLife } : p);
-    return { ...s, players, life: players.find(p => p.isUser)?.life ?? s.life };
+    return { ...s, players };
   };
 
   // ── shared intents ────────────────────────────────────────────────────────

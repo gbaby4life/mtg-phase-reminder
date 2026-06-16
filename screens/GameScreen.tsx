@@ -14,15 +14,17 @@ import type { CardNameRecord } from "../System/cardSearchSystem";
 import { C, MANA_COLOR_ICONS, emptyManaCost, formatManaCostLabel, getManaCostValue, hasManaCost } from "../lib/types";
 import type { CastSpell, GraveyardEntry, ExileEntry, ManaPool, GameState, Action, CreatureCounterType, ManaCost } from "../lib/types";
 import {
-  PHASES, PINNED_TOKENS, COMMON_TOKENS, CREATURE_COUNTER_TYPES, MANA_COST_TYPES,
+  PHASES, PINNED_TOKENS, COMMON_TOKENS, CREATURE_COUNTER_TYPES,
   SPELL_TYPES, MANA_COLORS, RESOURCE_TOKENS, RAINBOW_COLORS, MTG_SUPERTYPES,
   MTG_ARTIFACT_SUBTYPES, MTG_BATTLE_SUBTYPES, MTG_CREATURE_SUBTYPES, MTG_ENCHANTMENT_SUBTYPES,
-  MTG_LAND_SUBTYPES, MTG_PLANESWALKER_SUBTYPES, MTG_SPELL_SUBTYPES, MTG_KEYWORD_ABILITIES,
+  MTG_LAND_SUBTYPES, MTG_PLANESWALKER_SUBTYPES, MTG_SPELL_SUBTYPES,
   MTG_SUBTYPES_BY_TYPE,
 } from "../lib/constants";
 import { buildBaseContext, combatPT } from "../lib/gameHelpers";
 import { s } from "../lib/styles";
 import BattlefieldModal from "../components/BattlefieldModal";
+import KeywordPicker from "../components/KeywordPicker";
+import ManaCostPicker from "../components/ManaCostPicker";
 import { getResourceTokenKind, getResourceTokenCompactText } from "../System/resourceTokenSystem";
 
 type CommanderLethalAlert = {
@@ -163,7 +165,9 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
   const canPlayExtraLands = extraLandPlays > 0;
   const isOppTurn = !state.isMyTurn;
   const currentTurnPlayerId = state.turnOrder[state.currentPlayerIndex];
-  const userLife = state.players.find(p => p.id === currentTurnPlayerId)?.life ?? state.life;
+  const userLife = state.players.find(p => p.id === currentTurnPlayerId)?.life
+    ?? state.players.find(p => p.isUser)?.life
+    ?? 20;
   const displayLands = isOppTurn
     ? state.spellLog.filter(sp =>
         sp.type === "Land" &&
@@ -173,7 +177,7 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
     : state.landsPlayed;
   const activeCreatures = state.spellLog.filter(sp =>
     sp.zone === "active" &&
-    (sp.type === "Creature" || (sp.type === "Token" && sp.tokenCategory === "creature"))
+    (sp.type === "Creature" || (sp.isToken && sp.tokenCategory === "creature"))
   );
   const userPlayer = state.players.find(p => p.isUser);
   const userColor = userPlayer?.color ?? C.accent;
@@ -335,13 +339,6 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
     return emptyManaCost();
   }
 
-  function updateSpellManaCost(key: keyof ManaCost, delta: number) {
-    setSpellManaCost(prev => ({
-      ...prev,
-      [key]: Math.max(0, (prev[key] ?? 0) + delta),
-    }));
-  }
-
   function getSpellManaCostForSave(): { manaCost?: ManaCost; manaValue?: number } {
     const manaCost = hasManaCost(spellManaCost) ? spellManaCost : undefined;
     return { manaCost, manaValue: getManaCostValue(manaCost) };
@@ -380,33 +377,6 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
       setReturnToBattlefieldAfterEdit(false);
       setBattlefieldModal(true);
     }
-  }
-
-  function renderManaCostEditor() {
-    const manaValue = getManaCostValue(spellManaCost) ?? 0;
-    return (
-      <View style={{ marginBottom: 16 }}>
-        <Text style={s.sectionLabel}>Mana Cost (optional)</Text>
-        <View style={{ backgroundColor: C.cardAlt, borderWidth: 1, borderColor: C.border, borderRadius: 10, padding: 10, gap: 8 }}>
-          {MANA_COST_TYPES.map(item => (
-            <View key={item.key} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-              <Text style={{ color: C.text, fontSize: 13, fontWeight: "700", flex: 1 }}>{item.label}</Text>
-              <TouchableOpacity style={[s.qtyBtn, { width: 34, height: 34 }]} onPress={() => updateSpellManaCost(item.key, -1)}>
-                <Text style={s.lifeBtnText}>−</Text>
-              </TouchableOpacity>
-              <Text style={{ color: C.text, fontSize: 16, fontWeight: "900", minWidth: 24, textAlign: "center", fontVariant: ["tabular-nums"] }}>
-                {spellManaCost[item.key] ?? 0}
-              </Text>
-              <TouchableOpacity style={[s.qtyBtn, { width: 34, height: 34 }]} onPress={() => updateSpellManaCost(item.key, 1)}>
-                <Text style={s.lifeBtnText}>+</Text>
-              </TouchableOpacity>
-            </View>
-          ))}
-          <Text style={s.reminderDesc}>Cost: {hasManaCost(spellManaCost) ? formatManaCostLabel(spellManaCost) : "None"}</Text>
-          <Text style={s.reminderDesc}>Mana Value: {manaValue}</Text>
-        </View>
-      </View>
-    );
   }
 
   function resetSpellDetailForm() {
@@ -942,9 +912,9 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
         {(() => {
           const activePerm = state.spellLog.filter(sp => sp.zone === "active");
           const bfCreatures = activePerm.filter(sp => sp.type === "Creature" && !sp.isToken);
-          const bfTokens = activePerm.filter(sp => sp.isToken || sp.type === "Token");
+          const bfTokens = activePerm.filter(sp => sp.isToken);
           const bfOther = activePerm.filter(sp =>
-            !sp.isToken && sp.type !== "Token" && sp.type !== "Creature" &&
+            !sp.isToken && sp.type !== "Creature" &&
             sp.type !== "Instant" && sp.type !== "Sorcery"
           );
           const hasAnything = bfCreatures.length > 0 || bfTokens.length > 0 || bfOther.length > 0;
@@ -1777,7 +1747,7 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
             </>)}
 
             {/* Token — resource */}
-            {activeSpell?.type === "Token" && activeSpell?.tokenCategory === "resource" && (() => {
+            {activeSpell?.isToken && activeSpell?.tokenCategory === "resource" && (() => {
               const spell = activeSpell!;
               const baseName = spell.name.replace(/^\d+x\s*/, "").toLowerCase();
               const use = (extra?: object) => {
@@ -1895,7 +1865,7 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
             })()}
 
             {/* Token — creature */}
-            {activeSpell?.type === "Token" && activeSpell?.tokenCategory === "creature" && (<>
+            {activeSpell?.isToken && activeSpell?.tokenCategory === "creature" && (<>
               <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.dangerDim, borderColor: C.danger, marginBottom: 8 }]} onPress={() => {
                 if (!activeSpell) return;
                 dispatch({ type: "CREATURE_TOKEN_EXIT", spellId: activeSpell.id, reason: "died" });
@@ -1927,7 +1897,7 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
             </>)}
 
             {/* Delete + Cancel — non-resource-token types only */}
-            {!(activeSpell?.type === "Token" && activeSpell?.tokenCategory === "resource") && (<>
+            {!(activeSpell?.isToken && activeSpell?.tokenCategory === "resource") && (<>
               <TouchableOpacity style={[s.actionBtn, { backgroundColor: C.accentDim, borderColor: C.accent, marginBottom: 8 }]} onPress={() => {
                 if (activeSpell) {
                   setSpellActionModal(false);
@@ -2157,7 +2127,7 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
               <Text style={s.sectionLabel}>Name</Text>
               <TextInput style={[s.input, { marginBottom: 16 }]} value={editSpellName} onChangeText={setEditSpellName} placeholder="Card name" placeholderTextColor={C.dim} />
               <Text style={s.sectionLabel}>Card Type</Text>
-              {activeSpell?.type === "Token" ? (
+              {activeSpell?.isToken ? (
                 <View style={{ backgroundColor: C.cardAlt, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 12, marginBottom: 16, borderWidth: 1, borderColor: C.border }}>
                   <Text style={{ color: C.muted, fontSize: 13 }}>◈ Token — {activeSpell.tokenCategory === "resource" ? "Resource" : "Creature"}</Text>
                 </View>
@@ -2205,15 +2175,8 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
                   <Text style={{ color: C.muted, fontSize: 24, alignSelf: "center" }}>/</Text>
                   <TextInput style={[s.input, { flex: 1, marginBottom: 0 }]} value={spellToughness} onChangeText={setSpellToughness} placeholder="Toughness" placeholderTextColor={C.dim} keyboardType="numeric" />
                 </View>
-                {renderManaCostEditor()}
-                <Text style={s.sectionLabel}>Keyword Abilities</Text>
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
-                  {MTG_KEYWORD_ABILITIES.map(ab => (
-                    <TouchableOpacity key={ab} style={[{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1.5 }, spellAbilities.includes(ab) ? { backgroundColor: C.successDim, borderColor: C.success } : { backgroundColor: C.cardAlt, borderColor: C.border }]} onPress={() => setSpellAbilities(prev => prev.includes(ab) ? prev.filter(x => x !== ab) : [...prev, ab])}>
-                      <Text style={{ color: spellAbilities.includes(ab) ? C.success : C.muted, fontSize: 12, fontWeight: "600" }}>{ab}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
+                <ManaCostPicker value={spellManaCost} onChange={setSpellManaCost} />
+                <KeywordPicker selected={spellAbilities} onChange={setSpellAbilities} />
               </>)}
               {editSpellType === "Planeswalker" && (<>
                 <Text style={s.sectionLabel}>Current Loyalty</Text>
@@ -2420,15 +2383,8 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
                   <Text style={{ color: C.muted, fontSize: 24, alignSelf: "center" }}>/</Text>
                   <TextInput style={[s.input, { flex: 1, marginBottom: 0 }]} value={spellToughness} onChangeText={setSpellToughness} placeholder="Toughness" placeholderTextColor={C.dim} keyboardType="numeric" />
                 </View>
-                {renderManaCostEditor()}
-                <Text style={s.sectionLabel}>Keyword Abilities (optional)</Text>
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
-                  {MTG_KEYWORD_ABILITIES.map(ab => (
-                    <TouchableOpacity key={ab} style={[{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1.5 }, spellAbilities.includes(ab) ? { backgroundColor: C.successDim, borderColor: C.success } : { backgroundColor: C.cardAlt, borderColor: C.border }]} onPress={() => setSpellAbilities(prev => prev.includes(ab) ? prev.filter(x => x !== ab) : [...prev, ab])}>
-                      <Text style={{ color: spellAbilities.includes(ab) ? C.success : C.muted, fontSize: 12, fontWeight: "600" }}>{ab}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
+                <ManaCostPicker value={spellManaCost} onChange={setSpellManaCost} />
+                <KeywordPicker label="Keyword Abilities (optional)" selected={spellAbilities} onChange={setSpellAbilities} />
               </>)}
 
               {/* PLANESWALKER */}

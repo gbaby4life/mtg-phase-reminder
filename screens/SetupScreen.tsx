@@ -6,10 +6,11 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { searchCardNames } from "../System/cardSearchSystem";
 import type { CardNameRecord } from "../System/cardSearchSystem";
-import { C, emptyManaCost, formatManaCostLabel, getManaCostValue, hasManaCost } from "../lib/types";
+import { C, emptyManaCost, getManaCostValue, hasManaCost } from "../lib/types";
 import type { ManaCost, Player, GameState, Action, CommanderRecord } from "../lib/types";
-import { MANA_COST_TYPES } from "../lib/constants";
 import { s } from "../lib/styles";
+import KeywordPicker from "../components/KeywordPicker";
+import ManaCostPicker from "../components/ManaCostPicker";
 
 type CommanderSetupForm = {
   playerIndex: number;
@@ -17,10 +18,11 @@ type CommanderSetupForm = {
   manaCost: ManaCost;
   power: string;
   toughness: string;
+  abilities: string[];
 };
 
 function makeCommanderSetupForm(playerIndex: number): CommanderSetupForm {
-  return { playerIndex, name: "", manaCost: emptyManaCost(), power: "", toughness: "" };
+  return { playerIndex, name: "", manaCost: emptyManaCost(), power: "", toughness: "", abilities: [] };
 }
 
 export default function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Action> }) {
@@ -120,37 +122,6 @@ export default function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Act
     );
   }
 
-  function updateCommanderManaCost(playerIndex: number, key: keyof ManaCost, delta: number) {
-    setCommanderForms(prev => prev.map(form => form.playerIndex === playerIndex
-      ? { ...form, manaCost: { ...form.manaCost, [key]: Math.max(0, (form.manaCost[key] ?? 0) + delta) } }
-      : form
-    ));
-  }
-
-  function renderSetupManaCostEditor(form: CommanderSetupForm) {
-    const manaValue = getManaCostValue(form.manaCost) ?? 0;
-    return (
-      <View style={{ backgroundColor: C.cardAlt, borderWidth: 1, borderColor: C.border, borderRadius: 10, padding: 10, gap: 8, marginBottom: 12 }}>
-        {MANA_COST_TYPES.map(item => (
-          <View key={item.key} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-            <Text style={{ color: C.text, fontSize: 13, fontWeight: "700", flex: 1 }}>{item.label}</Text>
-            <TouchableOpacity style={[s.qtyBtn, { width: 34, height: 34 }]} onPress={() => updateCommanderManaCost(form.playerIndex, item.key, -1)}>
-              <Text style={s.lifeBtnText}>−</Text>
-            </TouchableOpacity>
-            <Text style={{ color: C.text, fontSize: 16, fontWeight: "900", minWidth: 24, textAlign: "center", fontVariant: ["tabular-nums"] }}>
-              {form.manaCost[item.key] ?? 0}
-            </Text>
-            <TouchableOpacity style={[s.qtyBtn, { width: 34, height: 34 }]} onPress={() => updateCommanderManaCost(form.playerIndex, item.key, 1)}>
-              <Text style={s.lifeBtnText}>+</Text>
-            </TouchableOpacity>
-          </View>
-        ))}
-        <Text style={s.reminderDesc}>Cost: {hasManaCost(form.manaCost) ? formatManaCostLabel(form.manaCost) : "None"}</Text>
-        <Text style={s.reminderDesc}>Mana Value: {manaValue}</Text>
-      </View>
-    );
-  }
-
   function handleStartGame() {
     if (!canStartGame) return;
     const players: Player[] = playerNames.map((name, i) => ({
@@ -180,6 +151,7 @@ export default function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Act
             manaValue: getManaCostValue(manaCost),
             power: !isNaN(power) ? power : undefined,
             toughness: !isNaN(toughness) ? toughness : undefined,
+            abilities: form.abilities.length > 0 ? form.abilities : undefined,
           }];
         })
       : [];
@@ -334,7 +306,7 @@ export default function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Act
                     />
                     {renderCommanderNameSuggestions(form)}
                     <Text style={[s.gameTypeDesc, { marginBottom: 6 }]}>Mana Cost</Text>
-                    {renderSetupManaCostEditor(form)}
+                    <ManaCostPicker value={form.manaCost} onChange={next => updateCommanderForm(form.playerIndex, { manaCost: next })} />
                     <Text style={[s.gameTypeDesc, { marginBottom: 6 }]}>Power / Toughness optional</Text>
                     <View style={{ flexDirection: "row", gap: 10 }}>
                       <TextInput
@@ -355,6 +327,11 @@ export default function SetupScreen({ dispatch }: { dispatch: React.Dispatch<Act
                         keyboardType="numeric"
                       />
                     </View>
+                    <KeywordPicker
+                      label="Keyword Abilities (optional)"
+                      selected={form.abilities}
+                      onChange={next => updateCommanderForm(form.playerIndex, { abilities: next })}
+                    />
                   </View>
                 ))}
                 {!commandersComplete && (

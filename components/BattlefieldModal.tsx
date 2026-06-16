@@ -552,7 +552,7 @@ export default function BattlefieldModal({ visible, onClose, state, dispatch, on
               })()}
 
               {liveActive && (() => {
-                const isResourceToken = liveActive.type === "Token" && liveActive.tokenCategory === "resource";
+                const isResourceToken = !!liveActive.isToken && liveActive.tokenCategory === "resource";
                 const isCreatureToken = !!liveActive.isToken && liveActive.tokenCategory === "creature";
                 const kind = isResourceToken ? getResourceTokenKind(liveActive.name) : null;
                 return (

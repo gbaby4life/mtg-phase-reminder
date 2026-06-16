@@ -234,7 +234,7 @@ export type GameState = {
   screen: "menu" | "setup" | "game" | "opponent-turn";
   isMyTurn: boolean;
   activePhaseView: string | null;
-  playerName: string; life: number; startingLife: number;
+  playerName: string;
   gameType: string; turnNumber: number; phaseIndex: number;
   phaseLocked: boolean; cardsDrawn: number; landsPlayed: number;
   spellsCastThisTurn: number;
