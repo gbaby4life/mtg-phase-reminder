@@ -325,6 +325,41 @@ export function reducer(state: GameState, action: Action): GameState {
       const updatedHistory = spell.type === "Land" ? state.history : [...state.history, entry];
       return { ...state, spellLog: [...state.spellLog, spell], spellsCastThisTurn: newSpellCount, creaturesCastThisTurn: newCreatureCount, reminders: updatedReminders, pendingReminderFires: [...state.pendingReminderFires, ...newInstances], history: updatedHistory, eventOwnerPlayerId: null };
     }
+    case "CAST_AS_COMMANDER": {
+      const ownerPlayerId = action.spellData.playerId ?? state.eventOwnerPlayerId ?? state.turnOrder[state.currentPlayerIndex];
+      const spellId = `spell-${Date.now()}-${Math.random()}`;
+      const commanderId = `commander-${spellId}`;
+      const spell: CastSpell = {
+        ...action.spellData,
+        id: spellId,
+        turnNumber: state.turnNumber,
+        phase: PHASES[state.phaseIndex],
+        zone: "commandZone",
+        playerId: ownerPlayerId,
+        isCommander: true,
+        commanderId,
+        commanderOwnerPlayerId: ownerPlayerId,
+      };
+      const commanderRecord = {
+        id: commanderId,
+        ownerPlayerId,
+        name: spell.name,
+        manaValue: spell.manaValue,
+        manaCost: spell.manaCost,
+        type: spell.type,
+        power: spell.power,
+        toughness: spell.toughness,
+        abilities: spell.abilities,
+        supertype: spell.supertype,
+        subtype: spell.subtype,
+        subtype2: spell.subtype2,
+        currentZone: "commandZone" as const,
+        spellId: spell.id,
+        timesCastFromCommandZone: 0,
+      };
+      const entry = logEntry(state, `★ ${spell.name} set as commander.`, ownerPlayerId);
+      return { ...state, spellLog: [...state.spellLog, spell], commanders: [...state.commanders, commanderRecord], history: [...state.history, entry], eventOwnerPlayerId: null };
+    }
     case "LOG": { const entry = logEntry(state, action.message, action.playerId); return { ...state, history: [...state.history, entry], eventOwnerPlayerId: null }; }
     case "LOG_EVENT": { const entry = logEntry(state, `[${action.eventType}] ${action.detail}`, action.playerId); return { ...state, history: [...state.history, entry], eventOwnerPlayerId: null }; }
     case "SET_EVENT_OWNER": return { ...state, eventOwnerPlayerId: action.playerId };

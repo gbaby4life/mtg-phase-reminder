@@ -295,6 +295,7 @@ export type Action =
   | { type: "LOG"; message: string; playerId?: string }
   | { type: "LOG_EVENT"; eventType: string; detail: string; playerId?: string }
   | { type: "CAST_SPELL"; spellData: Omit<CastSpell, "id" | "turnNumber" | "phase" | "zone"> }
+  | { type: "CAST_AS_COMMANDER"; spellData: Omit<CastSpell, "id" | "turnNumber" | "phase" | "zone"> }
   | { type: "DELETE_SPELL"; id: string }
   | { type: "EDIT_SPELL"; id: string; updates: Partial<Omit<CastSpell, "id" | "turnNumber" | "phase" | "zone">> }
   | { type: "UPDATE_LOYALTY"; id: string; delta: number }

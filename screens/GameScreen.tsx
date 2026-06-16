@@ -156,6 +156,7 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
   const [ubEffectCustomText, setUbEffectCustomText] = useState("");
   const [hubEventsModal, setHubEventsModal] = useState(false);
   const [hubEventOwner, setHubEventOwner] = useState<string>("");
+  const [commanderMode, setCommanderMode] = useState(false);
   const hubOwnerRef = useRef<string | null>(null);
   const prevActivePhaseViewRef = useRef<string | null>(null);
   const prevCommanderDamageRef = useRef<GameState["commanderDamage"] | null>(null);
@@ -534,7 +535,7 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
     { id: "land-played", label: "Land Played", icon: "🌲", color: C.success },
     { id: "cards-drawn-discarded", label: "Cards", icon: "🃏", color: "#60A5FA" },
     { id: "add-mana", label: "Add Mana", icon: "💎", color: C.warning },
-    { id: "creature-died", label: "Creature Died", icon: "💀", color: C.danger },
+    { id: "set-commander", label: "Set Commander", icon: "★", color: C.accent },
     { id: "token-created", label: "Token", icon: "◈", color: C.warning },
     { id: "counter-added", label: "Counters", icon: "+1", color: "#A78BFA" },
     { id: "others", label: "Others", icon: "★", color: C.muted },
@@ -542,10 +543,10 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
 
   function handleEvent(id: string) {
     if (id !== "counter-added") setReturnToBattlefieldAfterCounter(false);
-    if (id === "spell-cast") { setSelectedSpell(null); setSpellName(""); setSpellNameSuggestions([]); setSpellModal(true); }
+    if (id === "spell-cast") { setCommanderMode(false); setSelectedSpell(null); setSpellName(""); setSpellNameSuggestions([]); setSpellModal(true); }
     else if (id === "land-played") { setLandQty(1); setLandModal(true); }
     else if (id === "cards-drawn-discarded") { setDrawQty(0); setDiscardQty(0); setDrawModal(true); }
-    else if (id === "creature-died") { setCreatureName(""); setCreatureModal(true); }
+    else if (id === "set-commander") { setCommanderMode(true); setSelectedSpell(null); setSpellName(""); setSpellNameSuggestions([]); setSpellModal(true); }
     else if (id === "token-created") { setTokenSearch(""); setSelectedToken(null); setTokenQty(1); setTokenModal(true); }
     else if (id === "add-mana") { setManaEventAmounts({ white: 0, blue: 0, black: 0, red: 0, green: 0, colorless: 0 }); setAddManaModal(true); }
     else if (id === "others") { setOthersModal(true); }
@@ -2460,7 +2461,7 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
                   const defense = parseInt(spellDefense, 10);
                   const manaFields = selectedSpell === "Creature" ? getSpellManaCostForSave() : {};
                   dispatch({
-                    type: "CAST_SPELL",
+                    type: commanderMode ? "CAST_AS_COMMANDER" : "CAST_SPELL",
                     spellData: {
                       name: spellName.trim() || selectedSpell,
                       type: selectedSpell,
@@ -2482,6 +2483,7 @@ export default function GameScreen({ state, dispatch }: { state: GameState; disp
                     },
                   });
                   setSpellDetailModal(false);
+                  setCommanderMode(false);
                   setSpellNameSuggestions([]);
                   const spellReminderEvent = selectedSpell === "Creature" ? "Creature enters the battlefield"
                     : selectedSpell === "Instant" ? "Instant is cast"
